@@ -1,0 +1,16 @@
+{
+  "name": "motor-service-tracker",
+  "version": "1.0.0",
+  "description": "Ebike motor service tracking app for Greg Minnaar Cycles",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^2.0.1"
+  }
+}
