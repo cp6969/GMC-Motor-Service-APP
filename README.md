@@ -1,6 +1,10 @@
 # GMC Motor Service Log
 
-A mobile-optimized web app for tracking ebike motor service records at Greg Minnaar Cycles. Log serial numbers, dealer info, service work, and photos for every motor that comes through the workshop. Install it to your phone's home screen and it behaves like a native app.
+**Status as of 2026-08-09**: running, healthy. Container `motor-service-tracker` up, `/healthz`-equivalent root path returns 200, clean logs.
+
+**Web address**: https://motors.13industries.co.za (public, via Cloudflare Tunnel). On the local network you can also reach it directly at `http://<your-unraid-ip>:8091`.
+
+A mobile-optimized web app for tracking ebike motor service records at Greg Minnaar Cycles, app at motors.13industries.co.za. Log serial numbers, dealer info, service work, and photos for every motor that comes through the workshop. Install it to your phone's home screen and it behaves like a native app.
 
 ## What it does
 
@@ -24,7 +28,7 @@ A mobile-optimized web app for tracking ebike motor service records at Greg Minn
    docker compose up -d --build
    ```
    (If your Unraid doesn't have the `docker compose` plugin, you can instead build the image and run it from the Unraid **Docker** tab using the `backend/Dockerfile`, mapping port `3000` to whatever host port you like, and mounting `/app/data` and `/app/uploads` to persistent appdata folders.)
-4. The app will be available at `http://<your-unraid-ip>:8090` (or whatever host port you chose).
+4. The app will be available at `http://<your-unraid-ip>:8091` (or whatever host port you chose).
 
 ### Data persistence
 
@@ -36,7 +40,7 @@ Back these two folders up as part of your normal Unraid backup routine (e.g. you
 
 ## Using it on your phones
 
-1. Open `http://<your-unraid-ip>:8090` in Chrome (Android) or Safari (iPhone).
+1. Open https://motors.13industries.co.za (or `http://<your-unraid-ip>:8091` on the local network) in Chrome (Android) or Safari (iPhone).
 2. Log in with the workshop passcode.
 3. Use the browser menu → **"Add to Home screen" / "Install app"**. It'll then open full-screen like a normal app, with its own icon.
 4. Do this on each phone that needs access — everyone shares the same passcode and sees the same records.

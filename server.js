@@ -13,6 +13,99 @@ const JWT_SECRET = process.env.JWT_SECRET || 'gmc-motor-tracker-secret-change-me
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
 const CLAUDE_MODEL = 'claude-sonnet-5';
 
+// ---------- Lightspeed Retail (R-Series) OAuth ----------
+// Same API/OAuth host PO Bridge already uses for this exact Lightspeed account
+// (api.lightspeedapp.com/API/V3) -- but Motor Tracker is its own, independent
+// Lightspeed app registration with its own client ID/secret/redirect URI, so it
+// has no dependency on PO Bridge staying up. client_id/secret/redirect_uri are
+// plain env vars (set once at deploy, essentially never change) -- same
+// convention this app already uses for ANTHROPIC_API_KEY/JWT_SECRET, and the
+// same pattern PO Bridge itself uses for its own Lightspeed credentials. The
+// resulting per-connection access/refresh tokens (which DO change, on every
+// OAuth handshake and every refresh) live in the DB instead.
+const LIGHTSPEED_CLIENT_ID = process.env.LIGHTSPEED_CLIENT_ID || '';
+const LIGHTSPEED_CLIENT_SECRET = process.env.LIGHTSPEED_CLIENT_SECRET || '';
+const LIGHTSPEED_REDIRECT_URI = process.env.LIGHTSPEED_REDIRECT_URI || '';
+const LIGHTSPEED_AUTHORIZE_URL = 'https://cloud.lightspeedapp.com/oauth/authorize.php';
+const LIGHTSPEED_TOKEN_URL = 'https://cloud.lightspeedapp.com/oauth/access_token.php';
+const LIGHTSPEED_API_BASE = 'https://api.lightspeedapp.com/API/V3';
+
+// In-memory OAuth state (CSRF protection for the redirect round-trip) -- fine
+// for this single-instance deployment, same tradeoff PO Bridge itself accepts
+// for the identical purpose (see app/routers/lightspeed_oauth.py there).
+const pendingLightspeedState = new Set();
+
+// Returns a currently-valid access token, refreshing it first if it's within
+// 2 minutes of expiring (same safety margin PO Bridge itself uses for this
+// exact class of problem). A refresh response may omit refresh_token
+// entirely -- Lightspeed's refresh tokens don't rotate -- so the existing one
+// is kept in that case, same behavior already confirmed for PO Bridge's own
+// connection to this account.
+async function getValidLightspeedToken() {
+  const creds = db.prepare('SELECT * FROM lightspeed_credentials WHERE id = 1').get();
+  if (!creds) {
+    const err = new Error('Lightspeed is not connected -- connect it from Settings first');
+    err.statusCode = 400;
+    throw err;
+  }
+  const safetyMarginMs = 2 * 60 * 1000;
+  if (new Date(creds.expires_at).getTime() > Date.now() + safetyMarginMs) {
+    return { accessToken: creds.access_token, accountId: creds.account_id };
+  }
+  const tokenRes = await fetch(LIGHTSPEED_TOKEN_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: LIGHTSPEED_CLIENT_ID,
+      client_secret: LIGHTSPEED_CLIENT_SECRET,
+      refresh_token: creds.refresh_token,
+      grant_type: 'refresh_token',
+    }),
+  });
+  if (!tokenRes.ok) {
+    const err = new Error('Failed to refresh the Lightspeed connection -- try reconnecting from Settings');
+    err.statusCode = 502;
+    throw err;
+  }
+  const tokenData = await tokenRes.json();
+  const newExpiresAt = new Date(Date.now() + (tokenData.expires_in || 1800) * 1000).toISOString();
+  const newRefreshToken = tokenData.refresh_token || creds.refresh_token;
+  db.prepare('UPDATE lightspeed_credentials SET access_token = ?, refresh_token = ?, expires_at = ? WHERE id = 1')
+    .run(tokenData.access_token, newRefreshToken, newExpiresAt);
+  return { accessToken: tokenData.access_token, accountId: creds.account_id };
+}
+
+// A dealer's own Lightspeed customer link (set once in Settings, section
+// below) is what a dealer-sent record actually uses -- resolved fresh at
+// write time from the dealers table, not trusted from client input, so a
+// record can never claim a link to a customer the dealer database doesn't
+// actually have on file.
+function resolveDealerLightspeedLink(dealerName) {
+  if (!dealerName) return { id: null, name: null };
+  const dealer = db.prepare(
+    'SELECT lightspeed_customer_id, lightspeed_customer_name FROM dealers WHERE name = ? COLLATE NOCASE'
+  ).get(dealerName);
+  return dealer ? { id: dealer.lightspeed_customer_id, name: dealer.lightspeed_customer_name } : { id: null, name: null };
+}
+
+// Normalizes a raw Lightspeed Item into the shape the parts catalog stores --
+// same field names/derivation PO Bridge itself relies on (manufacturerSku,
+// defaultCost, and the nested Prices.ItemPrice "Default" entry for retail
+// price -- see app/invoice_processor.py's own Item price handling there).
+function normalizeLightspeedItem(item) {
+  const prices = item.Prices && item.Prices.ItemPrice
+    ? (Array.isArray(item.Prices.ItemPrice) ? item.Prices.ItemPrice : [item.Prices.ItemPrice])
+    : [];
+  const defaultPrice = prices.find(p => p.useType === 'Default');
+  return {
+    id: item.itemID,
+    sku: item.manufacturerSku || '',
+    description: item.description || '',
+    cost: item.defaultCost !== undefined && item.defaultCost !== null && item.defaultCost !== '' ? Number(item.defaultCost) : null,
+    retail_price: defaultPrice ? Number(defaultPrice.amount) : null,
+  };
+}
+
 const BRANDS = ['Brose', 'Mahle'];
 const STAGES = ['received', 'inspection', 'quoted', 'in_repair', 'completed', 'returned'];
 const QUOTE_STATUSES = ['not_sent', 'pending', 'approved', 'declined', 'skipped', 'refurb'];
@@ -123,7 +216,8 @@ app.post('/api/records', authMiddleware, (req, res) => {
   const {
     serial_number, brand, model, dealer_name, dealer_contact, source_type,
     date_received, date_completed, status, issue_reported,
-    work_performed, parts_replaced, technician, notes
+    work_performed, parts_replaced, technician, notes,
+    lightspeed_customer_id, lightspeed_customer_name
   } = req.body;
 
   if (!serial_number || !serial_number.trim()) {
@@ -139,18 +233,33 @@ app.post('/api/records', authMiddleware, (req, res) => {
     return res.status(400).json({ error: `status must be one of: ${STAGES.join(', ')}` });
   }
 
+  const resolvedSourceType = source_type || 'dealer';
+  // A dealer-sent record always uses that dealer's own saved Lightspeed link
+  // (server-resolved, see resolveDealerLightspeedLink above) -- a direct
+  // customer's record uses whatever the front-end's own live search actually
+  // resolved, since there's no local entity to look it up from instead.
+  let lsCustomerId = lightspeed_customer_id || null;
+  let lsCustomerName = lightspeed_customer_name || null;
+  if (resolvedSourceType === 'dealer') {
+    const link = resolveDealerLightspeedLink(dealer_name);
+    lsCustomerId = link.id;
+    lsCustomerName = link.name;
+  }
+
   const stmt = db.prepare(`
     INSERT INTO service_records
     (serial_number, brand, model, dealer_name, dealer_contact, source_type, date_received,
-     date_completed, status, issue_reported, work_performed, parts_replaced, technician, notes, share_token)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     date_completed, status, issue_reported, work_performed, parts_replaced, technician, notes, share_token,
+     lightspeed_customer_id, lightspeed_customer_name)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const result = stmt.run(
     serial_number.trim(), brand, model || null, dealer_name || null,
-    dealer_contact || null, source_type || 'dealer', date_received || null, date_completed || null,
+    dealer_contact || null, resolvedSourceType, date_received || null, date_completed || null,
     status || 'received', issue_reported || null, work_performed || null,
     parts_replaced || null, technician || null, notes || null,
-    crypto.randomBytes(12).toString('hex')
+    crypto.randomBytes(12).toString('hex'),
+    lsCustomerId, lsCustomerName
   );
   const record = db.prepare('SELECT * FROM service_records WHERE id = ?').get(result.lastInsertRowid);
   res.status(201).json(record);
@@ -174,12 +283,21 @@ app.put('/api/records/:id', authMiddleware, (req, res) => {
     'serial_number', 'brand', 'model', 'dealer_name', 'dealer_contact', 'source_type',
     'date_received', 'date_completed', 'date_returned', 'status', 'issue_reported', 'damage_found',
     'work_performed', 'parts_replaced', 'technician', 'notes',
-    'quote_amount', 'quote_notes', 'refurb_serial'
+    'quote_amount', 'quote_notes', 'refurb_serial',
+    'lightspeed_customer_id', 'lightspeed_customer_name'
   ];
   const updates = {};
   fields.forEach(f => {
     updates[f] = req.body[f] !== undefined ? req.body[f] : existing[f];
   });
+
+  // Same rule as record creation: a dealer-sent record always uses that
+  // dealer's own current Lightspeed link, never whatever the client sent.
+  if (updates.source_type === 'dealer') {
+    const link = resolveDealerLightspeedLink(updates.dealer_name);
+    updates.lightspeed_customer_id = link.id;
+    updates.lightspeed_customer_name = link.name;
+  }
 
   db.prepare(`
     UPDATE service_records SET
@@ -187,6 +305,7 @@ app.put('/api/records/:id', authMiddleware, (req, res) => {
       date_received = ?, date_completed = ?, date_returned = ?, status = ?, issue_reported = ?, damage_found = ?,
       work_performed = ?, parts_replaced = ?, technician = ?, notes = ?,
       quote_amount = ?, quote_notes = ?, refurb_serial = ?,
+      lightspeed_customer_id = ?, lightspeed_customer_name = ?,
       updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
   `).run(
@@ -194,7 +313,8 @@ app.put('/api/records/:id', authMiddleware, (req, res) => {
     updates.dealer_contact, updates.source_type, updates.date_received, updates.date_completed,
     updates.date_returned, updates.status, updates.issue_reported, updates.damage_found, updates.work_performed,
     updates.parts_replaced, updates.technician, updates.notes,
-    updates.quote_amount, updates.quote_notes, updates.refurb_serial, req.params.id
+    updates.quote_amount, updates.quote_notes, updates.refurb_serial,
+    updates.lightspeed_customer_id, updates.lightspeed_customer_name, req.params.id
   );
 
   const record = db.prepare('SELECT * FROM service_records WHERE id = ?').get(req.params.id);
@@ -377,6 +497,103 @@ app.post('/api/records/:id/refurb', authMiddleware, (req, res) => {
 });
 
 // ---------- Parts catalog ----------
+app.get('/api/dealers', authMiddleware, (req, res) => {
+  res.json(db.prepare('SELECT * FROM dealers ORDER BY name ASC').all());
+});
+
+app.post('/api/dealers', authMiddleware, (req, res) => {
+  const { name, contact } = req.body;
+  if (!name || !name.trim()) {
+    return res.status(400).json({ error: 'Dealer name is required' });
+  }
+  const existing = db.prepare('SELECT * FROM dealers WHERE name = ? COLLATE NOCASE').get(name.trim());
+  if (existing) {
+    return res.status(409).json({ error: 'A dealer with that name already exists' });
+  }
+  const result = db.prepare('INSERT INTO dealers (name, contact, share_token) VALUES (?, ?, ?)').run(
+    name.trim(), (contact || '').trim() || null, crypto.randomBytes(12).toString('hex')
+  );
+  res.status(201).json(db.prepare('SELECT * FROM dealers WHERE id = ?').get(result.lastInsertRowid));
+});
+
+app.put('/api/dealers/:id', authMiddleware, (req, res) => {
+  const existing = db.prepare('SELECT * FROM dealers WHERE id = ?').get(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Dealer not found' });
+  const { name, contact } = req.body;
+  if (!name || !name.trim()) {
+    return res.status(400).json({ error: 'Dealer name is required' });
+  }
+  const dup = db.prepare('SELECT * FROM dealers WHERE name = ? COLLATE NOCASE AND id != ?').get(name.trim(), req.params.id);
+  if (dup) return res.status(409).json({ error: 'A dealer with that name already exists' });
+  db.prepare('UPDATE dealers SET name = ?, contact = ? WHERE id = ?').run(
+    name.trim(), (contact || '').trim() || null, req.params.id
+  );
+  res.json(db.prepare('SELECT * FROM dealers WHERE id = ?').get(req.params.id));
+});
+
+app.delete('/api/dealers/:id', authMiddleware, (req, res) => {
+  db.prepare('DELETE FROM dealers WHERE id = ?').run(req.params.id);
+  res.json({ success: true });
+});
+
+app.post('/api/dealers/:id/lightspeed-link', authMiddleware, (req, res) => {
+  const existing = db.prepare('SELECT * FROM dealers WHERE id = ?').get(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Dealer not found' });
+  const { customer_id, customer_name } = req.body;
+  if (!customer_id || !customer_name) {
+    return res.status(400).json({ error: 'customer_id and customer_name are required' });
+  }
+  db.prepare('UPDATE dealers SET lightspeed_customer_id = ?, lightspeed_customer_name = ? WHERE id = ?')
+    .run(String(customer_id), customer_name, req.params.id);
+  res.json(db.prepare('SELECT * FROM dealers WHERE id = ?').get(req.params.id));
+});
+
+app.post('/api/dealers/:id/lightspeed-unlink', authMiddleware, (req, res) => {
+  db.prepare('UPDATE dealers SET lightspeed_customer_id = NULL, lightspeed_customer_name = NULL WHERE id = ?').run(req.params.id);
+  res.json(db.prepare('SELECT * FROM dealers WHERE id = ?').get(req.params.id));
+});
+
+// Live search against real Lightspeed customers -- used both by the dealer
+// Lightspeed-link picker (Settings) and the "Direct customer" search on a new
+// service record. Matches partial text against firstName/lastName/company
+// via Lightspeed's own "~" (LIKE) operator, OR-combined across all three --
+// see https://developers.lightspeedhq.com/retail/introduction/parameters/
+// for the exact query syntax this is built from.
+app.get('/api/lightspeed/customers', authMiddleware, async (req, res) => {
+  const q = (req.query.q || '').trim();
+  if (q.length < 2) return res.json([]);
+  try {
+    const { accessToken, accountId } = await getValidLightspeedToken();
+    const likeVal = encodeURIComponent(`%${q}%`);
+    const orClause = `firstName%3D~,${likeVal}|lastName%3D~,${likeVal}|company%3D~,${likeVal}`;
+    const rel = encodeURIComponent('["Contact"]');
+    const url = `${LIGHTSPEED_API_BASE}/Account/${accountId}/Customer.json?or=${orClause}&load_relations=${rel}&limit=15`;
+    const lsRes = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+    if (!lsRes.ok) throw new Error(`Lightspeed search failed: ${lsRes.status} ${await lsRes.text()}`);
+    const data = await lsRes.json();
+    const raw = data.Customer ? (Array.isArray(data.Customer) ? data.Customer : [data.Customer]) : [];
+    const results = raw.map(c => {
+      const contact = c.Contact || {};
+      const emails = contact.Emails && contact.Emails.ContactEmail
+        ? (Array.isArray(contact.Emails.ContactEmail) ? contact.Emails.ContactEmail : [contact.Emails.ContactEmail])
+        : [];
+      const phones = contact.Phones && contact.Phones.ContactPhone
+        ? (Array.isArray(contact.Phones.ContactPhone) ? contact.Phones.ContactPhone : [contact.Phones.ContactPhone])
+        : [];
+      return {
+        id: c.customerID,
+        name: [c.firstName, c.lastName].filter(Boolean).join(' ') || c.company || `Customer #${c.customerID}`,
+        company: c.company || '',
+        email: emails[0] ? emails[0].address : '',
+        phone: phones[0] ? phones[0].number : '',
+      };
+    });
+    res.json(results);
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ error: err.message });
+  }
+});
+
 app.get('/api/parts', authMiddleware, (req, res) => {
   res.json(db.prepare('SELECT * FROM parts_catalog ORDER BY description ASC').all());
 });
@@ -399,8 +616,18 @@ app.put('/api/parts/:id', authMiddleware, (req, res) => {
   if (!description || !description.trim()) {
     return res.status(400).json({ error: 'Description is required' });
   }
-  db.prepare('UPDATE parts_catalog SET sku = ?, description = ?, cost = ?, retail_price = ? WHERE id = ?').run(
-    (sku || '').trim() || null,
+  const newSku = (sku || '').trim() || null;
+  // Hand-editing the SKU invalidates any earlier Lightspeed verification --
+  // the stored lightspeed_item_id would otherwise keep pointing at whatever
+  // item the OLD sku resolved to, silently wrong. Editing cost/description
+  // alone doesn't touch it.
+  const skuChanged = newSku !== existing.sku;
+  db.prepare(`
+    UPDATE parts_catalog SET sku = ?, description = ?, cost = ?, retail_price = ?
+    ${skuChanged ? ', lightspeed_item_id = NULL, lightspeed_synced_at = NULL' : ''}
+    WHERE id = ?
+  `).run(
+    newSku,
     description.trim(),
     cost === '' || cost === undefined ? null : Number(cost),
     retail_price === '' || retail_price === undefined ? null : Number(retail_price),
@@ -412,6 +639,80 @@ app.put('/api/parts/:id', authMiddleware, (req, res) => {
 app.delete('/api/parts/:id', authMiddleware, (req, res) => {
   db.prepare('DELETE FROM parts_catalog WHERE id = ?').run(req.params.id);
   res.json({ success: true });
+});
+
+// Admin-only search against real Lightspeed items -- deliberately NOT exposed
+// to the "Add part" search a mechanic uses while building a quote (that one
+// only ever searches parts_catalog, see wf-parts-search below). This is only
+// ever called from the Settings "Add from Lightspeed" picker, so the parts a
+// mechanic can actually select stay a fixed, owner-curated list -- the whole
+// point being to keep an incorrect SKU from ever reaching a real quote.
+app.get('/api/lightspeed/items', authMiddleware, async (req, res) => {
+  const q = (req.query.q || '').trim();
+  if (q.length < 2) return res.json([]);
+  try {
+    const { accessToken, accountId } = await getValidLightspeedToken();
+    const likeVal = encodeURIComponent(`%${q}%`);
+    const orClause = `description%3D~,${likeVal}|manufacturerSku%3D~,${likeVal}`;
+    const url = `${LIGHTSPEED_API_BASE}/Account/${accountId}/Item.json?or=${orClause}&limit=15`;
+    const lsRes = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+    if (!lsRes.ok) throw new Error(`Lightspeed item search failed: ${lsRes.status} ${await lsRes.text()}`);
+    const data = await lsRes.json();
+    const raw = data.Item ? (Array.isArray(data.Item) ? data.Item : [data.Item]) : [];
+    res.json(raw.map(normalizeLightspeedItem));
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ error: err.message });
+  }
+});
+
+app.post('/api/parts/from-lightspeed', authMiddleware, (req, res) => {
+  const { lightspeed_item_id, sku, description, cost, retail_price } = req.body;
+  if (!lightspeed_item_id || !description || !description.trim()) {
+    return res.status(400).json({ error: 'lightspeed_item_id and description are required' });
+  }
+  const result = db.prepare(`
+    INSERT INTO parts_catalog (sku, description, cost, retail_price, lightspeed_item_id, lightspeed_synced_at)
+    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+  `).run(
+    (sku || '').trim() || null, description.trim(),
+    cost === undefined || cost === null || cost === '' ? null : Number(cost),
+    retail_price === undefined || retail_price === null || retail_price === '' ? null : Number(retail_price),
+    String(lightspeed_item_id)
+  );
+  res.status(201).json(db.prepare('SELECT * FROM parts_catalog WHERE id = ?').get(result.lastInsertRowid));
+});
+
+// Re-resolves an existing catalog row against Lightspeed by its own SKU
+// (exact manufacturerSku match, same field PO Bridge itself uses) -- backfills
+// the real itemID and refreshes cost/retail price if found, or reports
+// clearly that it wasn't, which is the actual point of this feature: catching
+// a wrong/stale SKU in the mechanic-facing catalog before it ever reaches a
+// real quote.
+app.post('/api/parts/:id/verify', authMiddleware, async (req, res) => {
+  const part = db.prepare('SELECT * FROM parts_catalog WHERE id = ?').get(req.params.id);
+  if (!part) return res.status(404).json({ error: 'Part not found' });
+  if (!part.sku) {
+    return res.json({ verified: false, reason: 'This part has no SKU to look up in Lightspeed' });
+  }
+  try {
+    const { accessToken, accountId } = await getValidLightspeedToken();
+    const url = `${LIGHTSPEED_API_BASE}/Account/${accountId}/Item.json?manufacturerSku=${encodeURIComponent(part.sku)}`;
+    const lsRes = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+    if (!lsRes.ok) throw new Error(`Lightspeed lookup failed: ${lsRes.status} ${await lsRes.text()}`);
+    const data = await lsRes.json();
+    const raw = data.Item ? (Array.isArray(data.Item) ? data.Item : [data.Item]) : [];
+    if (!raw.length) {
+      return res.json({ verified: false, reason: `No Lightspeed item found with SKU "${part.sku}"` });
+    }
+    const item = normalizeLightspeedItem(raw[0]);
+    db.prepare(`
+      UPDATE parts_catalog SET lightspeed_item_id = ?, cost = ?, retail_price = ?, lightspeed_synced_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(item.id, item.cost, item.retail_price, req.params.id);
+    res.json({ verified: true, part: db.prepare('SELECT * FROM parts_catalog WHERE id = ?').get(req.params.id) });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ error: err.message });
+  }
 });
 
 // ---------- AI serial number extraction ----------
@@ -557,6 +858,230 @@ app.get('/api/stats', authMiddleware, (req, res) => {
   res.json(counts);
 });
 
+// ---------- Lightspeed connection ----------
+app.get('/api/lightspeed/status', authMiddleware, (req, res) => {
+  const creds = db.prepare('SELECT account_id, connected_at, expires_at FROM lightspeed_credentials WHERE id = 1').get();
+  res.json({
+    configured: !!(LIGHTSPEED_CLIENT_ID && LIGHTSPEED_CLIENT_SECRET && LIGHTSPEED_REDIRECT_URI),
+    connected: !!creds,
+    account_id: creds ? creds.account_id : null,
+    connected_at: creds ? creds.connected_at : null,
+  });
+});
+
+// Called by the SPA (with its normal Bearer auth) to get a fresh, one-time
+// authorize URL -- the actual navigation to Lightspeed then happens as a real
+// browser redirect (window.location), which can't carry an Authorization
+// header, hence this two-step "fetch the URL, then navigate" shape instead of
+// a plain <a href> straight to /oauth/lightspeed/connect.
+app.get('/api/lightspeed/connect-url', authMiddleware, (req, res) => {
+  if (!LIGHTSPEED_CLIENT_ID || !LIGHTSPEED_REDIRECT_URI) {
+    return res.status(400).json({ error: 'Lightspeed isn\'t configured on the server yet (missing client ID/redirect URI)' });
+  }
+  const state = crypto.randomBytes(16).toString('hex');
+  pendingLightspeedState.add(state);
+  const params = new URLSearchParams({
+    response_type: 'code',
+    client_id: LIGHTSPEED_CLIENT_ID,
+    scope: 'employee:all',
+    state,
+    redirect_uri: LIGHTSPEED_REDIRECT_URI,
+  });
+  res.json({ url: `${LIGHTSPEED_AUTHORIZE_URL}?${params.toString()}` });
+});
+
+// The redirect target Lightspeed itself sends the browser back to -- can't be
+// behind authMiddleware (no Authorization header on a real navigation), so the
+// state token is what proves this callback corresponds to a connect attempt
+// this server actually initiated, not a forged/replayed request.
+app.get('/oauth/lightspeed/callback', async (req, res) => {
+  const { code, state, error } = req.query;
+  if (error || !code || !state || !pendingLightspeedState.has(state)) {
+    return res.redirect('/?lightspeed_error=1');
+  }
+  pendingLightspeedState.delete(state);
+  try {
+    const tokenRes = await fetch(LIGHTSPEED_TOKEN_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: LIGHTSPEED_CLIENT_ID,
+        client_secret: LIGHTSPEED_CLIENT_SECRET,
+        code,
+        grant_type: 'authorization_code',
+        redirect_uri: LIGHTSPEED_REDIRECT_URI,
+      }),
+    });
+    if (!tokenRes.ok) throw new Error(`Token exchange failed: ${tokenRes.status} ${await tokenRes.text()}`);
+    const tokenData = await tokenRes.json();
+
+    const accountRes = await fetch(`${LIGHTSPEED_API_BASE}/Account.json`, {
+      headers: { Authorization: `Bearer ${tokenData.access_token}` },
+    });
+    if (!accountRes.ok) throw new Error(`Account lookup failed: ${accountRes.status} ${await accountRes.text()}`);
+    const accountData = await accountRes.json();
+    const accountId = accountData.Account.accountID;
+    const expiresAt = new Date(Date.now() + (tokenData.expires_in || 1800) * 1000).toISOString();
+
+    db.prepare(`
+      INSERT INTO lightspeed_credentials (id, account_id, access_token, refresh_token, expires_at, connected_at)
+      VALUES (1, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(id) DO UPDATE SET
+        account_id = excluded.account_id, access_token = excluded.access_token,
+        refresh_token = excluded.refresh_token, expires_at = excluded.expires_at,
+        connected_at = CURRENT_TIMESTAMP
+    `).run(accountId, tokenData.access_token, tokenData.refresh_token, expiresAt);
+
+    res.redirect('/?lightspeed_connected=1');
+  } catch (err) {
+    console.error('Lightspeed OAuth callback failed:', err);
+    res.redirect('/?lightspeed_error=1');
+  }
+});
+
+app.post('/api/lightspeed/disconnect', authMiddleware, (req, res) => {
+  db.prepare('DELETE FROM lightspeed_credentials WHERE id = 1').run();
+  res.json({ success: true });
+});
+
+// Real Lightspeed employees, for the "which employee do pushed quotes get
+// attributed to" Settings picker -- this app has no per-mechanic login of
+// its own (one shared workshop passcode), so a pushed Sale/Quote needs one
+// fixed, explicitly-chosen real employeeID rather than trying to guess one.
+app.get('/api/lightspeed/employees', authMiddleware, async (req, res) => {
+  try {
+    const { accessToken, accountId } = await getValidLightspeedToken();
+    const lsRes = await fetch(`${LIGHTSPEED_API_BASE}/Account/${accountId}/Employee.json?limit=100`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!lsRes.ok) throw new Error(`Lightspeed employee lookup failed: ${lsRes.status}`);
+    const data = await lsRes.json();
+    const raw = data.Employee ? (Array.isArray(data.Employee) ? data.Employee : [data.Employee]) : [];
+    res.json(raw.filter(e => e.archived !== 'true').map(e => ({
+      id: e.employeeID, name: [e.firstName, e.lastName].filter(Boolean).join(' ').trim(),
+    })));
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ error: err.message });
+  }
+});
+
+app.get('/api/settings/lightspeed-employee', authMiddleware, (req, res) => {
+  res.json({
+    id: db.getSetting('lightspeed_employee_id'),
+    name: db.getSetting('lightspeed_employee_name'),
+  });
+});
+
+app.post('/api/settings/lightspeed-employee', authMiddleware, (req, res) => {
+  const { id, name } = req.body;
+  if (!id || !name) return res.status(400).json({ error: 'id and name are required' });
+  db.setSetting('lightspeed_employee_id', String(id));
+  db.setSetting('lightspeed_employee_name', name);
+  res.json({ id, name });
+});
+
+// The actual push -- creates a real, incomplete Lightspeed Sale for the
+// record's linked customer, attaches every quote line item as a real
+// SaleLine (resolved to a verified parts_catalog entry, never a bare SKU
+// string), then wraps it in a real Quote object. Confirmed live (2026-08-09,
+// using throwaway data since archived afterward) that a plain POST SaleLine
+// is rejected outright unless isSpecialOrder/isLayaway is set -- the actual
+// working mechanism is a PUT on the Sale itself with a nested SaleLines
+// array, which is NOT locked to special orders. All lines must go in ONE PUT
+// call -- confirmed live this is additive, so two separate PUT calls would
+// double up every line rather than replace them.
+app.post('/api/records/:id/push-to-lightspeed', authMiddleware, async (req, res) => {
+  const record = db.prepare('SELECT * FROM service_records WHERE id = ?').get(req.params.id);
+  if (!record) return res.status(404).json({ error: 'Record not found' });
+  if (record.lightspeed_quote_id) {
+    return res.status(400).json({ error: `Already pushed to Lightspeed as Quote #${record.lightspeed_quote_id}` });
+  }
+  if (!record.lightspeed_customer_id) {
+    return res.status(400).json({ error: 'This record has no linked Lightspeed customer yet' });
+  }
+  const lineItems = db.prepare('SELECT * FROM quote_line_items WHERE record_id = ? ORDER BY id ASC').all(req.params.id);
+  if (!lineItems.length) {
+    return res.status(400).json({ error: 'No quote line items to push' });
+  }
+  const employeeId = db.getSetting('lightspeed_employee_id');
+  if (!employeeId) {
+    return res.status(400).json({ error: 'Set a Lightspeed employee in Settings before pushing quotes' });
+  }
+
+  // Resolve every line against the owner-curated parts catalog -- a bare
+  // custom line (no SKU) or a SKU that's missing/unverified in the catalog
+  // blocks the whole push, named explicitly, rather than silently guessing
+  // or pushing a partial quote.
+  const problems = [];
+  const resolvedLines = lineItems.map(li => {
+    if (!li.sku) {
+      problems.push(`"${li.description}" has no SKU (added as a custom line)`);
+      return null;
+    }
+    const part = db.prepare('SELECT * FROM parts_catalog WHERE sku = ?').get(li.sku);
+    if (!part || !part.lightspeed_item_id) {
+      problems.push(`"${li.description}" (${li.sku}) isn't a verified Lightspeed item -- verify it in Settings first`);
+      return null;
+    }
+    return { itemID: part.lightspeed_item_id, unitQuantity: String(li.quantity), unitPrice: String(li.unit_price) };
+  });
+  if (problems.length) {
+    return res.status(400).json({ error: 'Cannot push -- fix these lines first', problems });
+  }
+
+  try {
+    const { accessToken, accountId } = await getValidLightspeedToken();
+    const authHeaders = { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' };
+    const acct = (path) => `${LIGHTSPEED_API_BASE}/Account/${accountId}/${path}`;
+
+    const shopRes = await fetch(acct('Shop.json'), { headers: authHeaders });
+    if (!shopRes.ok) throw new Error(`Couldn't look up the Lightspeed shop: ${shopRes.status}`);
+    const shopData = await shopRes.json();
+    const shop = Array.isArray(shopData.Shop) ? shopData.Shop[0] : shopData.Shop;
+    if (!shop) throw new Error('No Lightspeed shop found on this account');
+
+    const registerRes = await fetch(acct('Register.json'), { headers: authHeaders });
+    if (!registerRes.ok) throw new Error(`Couldn't look up the Lightspeed register: ${registerRes.status}`);
+    const registerData = await registerRes.json();
+    const register = Array.isArray(registerData.Register) ? registerData.Register[0] : registerData.Register;
+    if (!register) throw new Error('No Lightspeed register found on this account');
+
+    const saleRes = await fetch(acct('Sale.json'), {
+      method: 'POST', headers: authHeaders,
+      body: JSON.stringify({
+        customerID: record.lightspeed_customer_id, employeeID: employeeId,
+        shopID: shop.shopID, registerID: register.registerID, completed: 'false',
+      }),
+    });
+    if (!saleRes.ok) throw new Error(`Couldn't create the Lightspeed sale: ${saleRes.status} ${await saleRes.text()}`);
+    const saleData = await saleRes.json();
+    const saleId = saleData.Sale.saleID;
+
+    const linesRes = await fetch(acct(`Sale/${saleId}.json`), {
+      method: 'PUT', headers: authHeaders,
+      body: JSON.stringify({ SaleLines: { SaleLine: resolvedLines } }),
+    });
+    if (!linesRes.ok) throw new Error(`Couldn't add line items: ${linesRes.status} ${await linesRes.text()}`);
+
+    const quoteRes = await fetch(acct('Quote.json'), {
+      method: 'POST', headers: authHeaders,
+      body: JSON.stringify({ saleID: saleId, employeeID: employeeId, notes: record.quote_notes || '' }),
+    });
+    if (!quoteRes.ok) throw new Error(`Sale created, but the Quote wrapper failed: ${quoteRes.status} ${await quoteRes.text()}`);
+    const quoteData = await quoteRes.json();
+    const quoteId = quoteData.Quote.quoteID;
+
+    db.prepare(`
+      UPDATE service_records SET lightspeed_sale_id = ?, lightspeed_quote_id = ?, lightspeed_pushed_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(saleId, quoteId, req.params.id);
+
+    res.json({ success: true, lightspeed_sale_id: saleId, lightspeed_quote_id: quoteId });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ error: err.message });
+  }
+});
+
 // ---------- Public share page (no auth) ----------
 const STAGE_MESSAGES = {
   received: 'Your motor has arrived at the workshop and is awaiting inspection.',
@@ -612,6 +1137,33 @@ app.get('/api/share/:token', (req, res) => {
 app.get('/share/:token', (req, res) => {
   res.set('Cache-Control', 'no-store');
   res.sendFile(path.join(__dirname, 'public', 'share.html'));
+});
+
+// ---------- Public dealer history page (no auth) ----------
+// One permanent link per dealer (the token never changes once a dealer exists) --
+// unlike /api/share/:token above, which is per-record and meant to be re-shared for
+// each new job, this one is meant to be bookmarked/saved once and always shows that
+// dealer's current full motor history.
+app.get('/api/share/dealer/:token', (req, res) => {
+  const dealer = db.prepare('SELECT * FROM dealers WHERE share_token = ?').get(req.params.token);
+  if (!dealer) return res.status(404).json({ error: 'Not found' });
+
+  const records = db.prepare(`
+    SELECT id, share_token, serial_number, brand, model, status, date_received, date_completed, date_returned
+    FROM service_records
+    WHERE dealer_name = ? COLLATE NOCASE
+    ORDER BY date_received DESC, id DESC
+  `).all(dealer.name);
+
+  res.json({
+    dealer_name: dealer.name,
+    records: records.map((r, i) => ({ ...r, is_latest: i === 0 }))
+  });
+});
+
+app.get('/share/dealer/:token', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.sendFile(path.join(__dirname, 'public', 'dealer-share.html'));
 });
 
 // Fallback to index.html for SPA routing

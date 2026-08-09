@@ -258,6 +258,29 @@ input:focus, textarea:focus, select:focus, button:focus-visible {
 }
 .record-card:active { background: var(--panel-raised); }
 
+a.record-card {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+}
+
+.record-card.latest-record-card {
+  border-width: 2px;
+  border-color: #3FBF7F;
+  background: rgba(63, 191, 127, 0.1);
+}
+
+.latest-chip {
+  background: #3FBF7F;
+  color: #15171B;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
 .record-card-top {
   display: flex;
   justify-content: space-between;
@@ -296,6 +319,17 @@ input:focus, textarea:focus, select:focus, button:focus-visible {
   gap: 4px 10px;
 }
 
+.record-card-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.record-card-serial {
+  font-family: var(--mono);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
 .record-card-brand {
   font-weight: 600;
   color: var(--text);
@@ -317,6 +351,37 @@ input:focus, textarea:focus, select:focus, button:focus-visible {
   box-shadow: 0 6px 20px rgba(223, 255, 51, 0.35);
   cursor: pointer;
   z-index: 20;
+}
+
+/* On the Board screen only, at desktop widths, the "+" moves under the
+   first (Received) column instead of floating bottom-right -- easier to
+   find on a mouse-driven wide screen than a thumb-reachable phone FAB. */
+.fab-inline {
+  display: none;
+}
+
+@media (min-width: 900px) {
+  .board .fab {
+    display: none;
+  }
+  .fab-inline {
+    display: block;
+    margin-top: 10px;
+    width: 100%;
+    padding: 12px;
+    border-radius: 10px;
+    border: 1px dashed var(--border);
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .fab-inline:hover {
+    background: var(--panel-raised);
+    border-color: var(--accent);
+    color: var(--accent);
+  }
 }
 
 /* ---------- Detail / Form screens ---------- */
@@ -765,6 +830,44 @@ input:focus, textarea:focus, select:focus, button:focus-visible {
   color: var(--text-dim);
   margin-top: 6px;
   min-height: 14px;
+}
+
+/* ---------- Lightspeed customer search/link ---------- */
+.ls-search-results {
+  margin-top: 6px;
+}
+.ls-customer-result, .ls-item-result {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 6px;
+  cursor: pointer;
+  background: var(--panel-raised);
+}
+.ls-customer-result:active, .ls-item-result:active { background: var(--border); }
+.part-verify-badge {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+.part-verify-badge.verified { background: rgba(63, 191, 127, 0.15); color: #3FBF7F; }
+.part-verify-badge.unverified { background: rgba(242, 169, 59, 0.15); color: #F2A93B; }
+.part-verify-badge.notfound { background: rgba(224, 99, 122, 0.15); color: #E0637A; }
+.ls-linked-chip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: rgba(63, 191, 127, 0.12);
+  border: 1px solid #3FBF7F;
+  color: #3FBF7F;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+  margin-top: 6px;
 }
 
 /* ---------- Public share page ---------- */

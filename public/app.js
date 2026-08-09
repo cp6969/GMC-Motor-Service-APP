@@ -80,6 +80,24 @@ function fmtMoney(v) {
   return 'R' + Number(v).toFixed(2);
 }
 
+function lightspeedPushPanelHtml(r) {
+  if (r.lightspeed_quote_id) {
+    return `
+      <div class="ls-linked-chip" style="margin-top:10px">
+        <span>✓ Pushed to Lightspeed &mdash; Quote #${esc(r.lightspeed_quote_id)}</span>
+      </div>
+    `;
+  }
+  if (r.status !== 'completed' && r.status !== 'returned') {
+    return `<p class="hint-text">Can be pushed to Lightspeed once the motor is marked Completed.</p>`;
+  }
+  if (!r.lightspeed_customer_id) {
+    return `<p class="hint-text">Link a Lightspeed customer above before this can be pushed.</p>`;
+  }
+  if (!r.line_items || !r.line_items.length) return '';
+  return `<button class="btn btn-primary btn-small" id="push-to-lightspeed-btn" style="margin-top:10px">Push to Lightspeed</button>`;
+}
+
 function quoteLineItemsReadOnlyHtml(items) {
   if (!items || !items.length) return '';
   return `
@@ -118,6 +136,83 @@ async function copyToClipboard(text) {
     if (ok) return true;
   } catch (e) { /* fall through */ }
   return false;
+}
+
+// Shared, debounced Lightspeed customer search -- used both by the dealer
+// Lightspeed-link picker (Settings) and the "Direct customer" search on a new
+// service record. inputEl is the text box the tech types into, resultsEl is
+// where matches render, onSelect(customer) fires when one is clicked.
+function wireLightspeedSearch(inputEl, resultsEl, onSelect) {
+  let debounceTimer;
+  inputEl.addEventListener('input', () => {
+    clearTimeout(debounceTimer);
+    const q = inputEl.value.trim();
+    if (q.length < 2) { resultsEl.innerHTML = ''; return; }
+    debounceTimer = setTimeout(async () => {
+      resultsEl.innerHTML = `<div class="hint-text">Searching Lightspeed…</div>`;
+      try {
+        const results = await api(`/api/lightspeed/customers?q=${encodeURIComponent(q)}`);
+        if (!results.length) {
+          resultsEl.innerHTML = `<div class="hint-text">No matches in Lightspeed.</div>`;
+          return;
+        }
+        resultsEl.innerHTML = results.map(c => `
+          <div class="ls-customer-result" data-id="${esc(c.id)}">
+            <div style="font-weight:600">${esc(c.name)}${c.company ? ` <span class="hint-text">(${esc(c.company)})</span>` : ''}</div>
+            ${(c.phone || c.email) ? `<div class="hint-text">${[esc(c.phone), esc(c.email)].filter(Boolean).join(' &middot; ')}</div>` : ''}
+          </div>
+        `).join('');
+        resultsEl.querySelectorAll('.ls-customer-result').forEach(row => {
+          row.addEventListener('click', () => {
+            const chosen = results.find(c => String(c.id) === row.dataset.id);
+            resultsEl.innerHTML = '';
+            inputEl.value = '';
+            onSelect(chosen);
+          });
+        });
+      } catch (err) {
+        resultsEl.innerHTML = `<div class="hint-text">Search failed: ${esc(err.message)}</div>`;
+      }
+    }, 300);
+  });
+}
+
+// Same debounced-search shape as wireLightspeedSearch, but against real
+// Lightspeed items -- used ONLY by the admin-only "Add from Lightspeed"
+// picker on Settings' Parts catalog card, never surfaced to a mechanic.
+function wireLightspeedItemSearch(inputEl, resultsEl, onSelect) {
+  let debounceTimer;
+  inputEl.addEventListener('input', () => {
+    clearTimeout(debounceTimer);
+    const q = inputEl.value.trim();
+    if (q.length < 2) { resultsEl.innerHTML = ''; return; }
+    debounceTimer = setTimeout(async () => {
+      resultsEl.innerHTML = `<div class="hint-text">Searching Lightspeed…</div>`;
+      try {
+        const results = await api(`/api/lightspeed/items?q=${encodeURIComponent(q)}`);
+        if (!results.length) {
+          resultsEl.innerHTML = `<div class="hint-text">No matching Lightspeed items.</div>`;
+          return;
+        }
+        resultsEl.innerHTML = results.map(item => `
+          <div class="ls-item-result" data-id="${esc(item.id)}">
+            <div style="font-weight:600">${esc(item.description)}</div>
+            <div class="hint-text">${item.sku ? esc(item.sku) + ' &middot; ' : ''}Cost ${fmtMoney(item.cost)} &middot; Retail ${fmtMoney(item.retail_price)}</div>
+          </div>
+        `).join('');
+        resultsEl.querySelectorAll('.ls-item-result').forEach(row => {
+          row.addEventListener('click', () => {
+            const chosen = results.find(item => String(item.id) === row.dataset.id);
+            resultsEl.innerHTML = '';
+            inputEl.value = '';
+            onSelect(chosen);
+          });
+        });
+      } catch (err) {
+        resultsEl.innerHTML = `<div class="hint-text">Search failed: ${esc(err.message)}</div>`;
+      }
+    }, 300);
+  });
 }
 
 function openLightbox(src) {
@@ -229,11 +324,49 @@ function renderSettings() {
         </form>
         <p class="hint-text">Everyone at the workshop shares this one passcode to log in — updating it here takes effect immediately for new logins. Devices already logged in stay logged in until they log out.</p>
 
-        <div class="section-label">Parts catalog</div>
-        <p class="hint-text">Used when building a quote in the Quoted stage — add more here any time (e.g. Mahle parts later).</p>
-        <div id="parts-catalog-list"><div class="empty-state"><div class="spinner"></div></div></div>
+        <div class="section-label">Lightspeed</div>
+        <div id="lightspeed-status"><div class="empty-state"><div class="spinner"></div></div></div>
+        <div class="field" style="margin-top:10px">
+          <label>Employee for pushed quotes</label>
+          <select id="lightspeed-employee-select" disabled>
+            <option value="">Loading&hellip;</option>
+          </select>
+        </div>
+        <p class="hint-text">A pushed quote is created in Lightspeed under this employee, since there's no per-mechanic login here.</p>
+
+        <div class="section-label">Dealers</div>
+        <p class="hint-text">Shown as a pick-list on the "Sent by" section of a new service record. Add, rename, or remove dealers here any time.</p>
+        <div id="dealers-list"><div class="empty-state"><div class="spinner"></div></div></div>
         <div class="workflow-card" style="margin-top:12px">
-          <div class="section-label" style="margin-top:0">Add a part</div>
+          <div class="section-label" style="margin-top:0">Add a dealer</div>
+          <div class="field">
+            <label>Name</label>
+            <input type="text" id="dealer-new-name" />
+          </div>
+          <div class="field">
+            <label>Contact</label>
+            <input type="text" id="dealer-new-contact" placeholder="Phone or email (optional)" />
+          </div>
+          <button class="btn btn-secondary" id="dealer-add-btn">Add dealer</button>
+        </div>
+
+        <div class="section-label">Parts catalog</div>
+        <p class="hint-text">This is the exact list a mechanic can pick from when building a quote -- they never see a live Lightspeed search, only what's added here. Add real parts below, or verify existing ones still match a real Lightspeed item.</p>
+        <div style="display:flex;justify-content:flex-end;margin-bottom:6px">
+          <button class="btn btn-ghost btn-small" id="parts-verify-all-btn">Verify all</button>
+        </div>
+        <div id="parts-catalog-list"><div class="empty-state"><div class="spinner"></div></div></div>
+
+        <div class="workflow-card" style="margin-top:12px">
+          <div class="section-label" style="margin-top:0">Add from Lightspeed</div>
+          <p class="hint-text" style="margin-top:0">Search your real Lightspeed catalog and add the exact item -- captures its real SKU and current cost/retail price automatically.</p>
+          <input type="text" id="part-ls-search-input" placeholder="Search Lightspeed items&hellip;" />
+          <div class="ls-search-results" id="part-ls-search-results"></div>
+        </div>
+
+        <div class="workflow-card" style="margin-top:12px">
+          <div class="section-label" style="margin-top:0">Add a part manually</div>
+          <p class="hint-text" style="margin-top:0">For a one-off code with no real Lightspeed item (e.g. a labour charge) -- won't show as Lightspeed-verified until linked.</p>
           <div class="field">
             <label>SKU</label>
             <input type="text" id="part-new-sku" style="font-family:var(--mono);text-transform:uppercase" />
@@ -259,7 +392,67 @@ function renderSettings() {
   `;
 
   document.getElementById('settings-back-btn').addEventListener('click', () => activeTab === 'history' ? renderList() : renderBoard());
+  loadLightspeedStatus();
+  loadLightspeedEmployeeSetting();
+  loadDealersSettings();
+  document.getElementById('dealer-add-btn').addEventListener('click', async () => {
+    const name = document.getElementById('dealer-new-name').value.trim();
+    const contact = document.getElementById('dealer-new-contact').value.trim();
+    if (!name) { showToast('Enter a dealer name'); return; }
+    try {
+      await api('/api/dealers', { method: 'POST', body: JSON.stringify({ name, contact }) });
+      document.getElementById('dealer-new-name').value = '';
+      document.getElementById('dealer-new-contact').value = '';
+      showToast('Dealer added');
+      loadDealersSettings();
+    } catch (err) { showToast(err.message); }
+  });
+
   loadPartsCatalogSettings();
+
+  wireLightspeedItemSearch(
+    document.getElementById('part-ls-search-input'),
+    document.getElementById('part-ls-search-results'),
+    async (item) => {
+      try {
+        await api('/api/parts/from-lightspeed', {
+          method: 'POST',
+          body: JSON.stringify({
+            lightspeed_item_id: item.id, sku: item.sku, description: item.description,
+            cost: item.cost, retail_price: item.retail_price,
+          }),
+        });
+        showToast('Added from Lightspeed');
+        loadPartsCatalogSettings();
+      } catch (err) { showToast(err.message); }
+    }
+  );
+
+  document.getElementById('parts-verify-all-btn').addEventListener('click', async () => {
+    const btn = document.getElementById('parts-verify-all-btn');
+    btn.disabled = true;
+    try {
+      const parts = await api('/api/parts');
+      const unverified = parts.filter(p => !p.lightspeed_item_id && p.sku);
+      if (!unverified.length) { showToast('Nothing to verify'); return; }
+      let ok = 0, failed = 0;
+      for (const p of unverified) {
+        btn.textContent = `Verifying ${ok + failed + 1} of ${unverified.length}…`;
+        try {
+          const result = await api(`/api/parts/${p.id}/verify`, { method: 'POST' });
+          if (result.verified) ok++; else failed++;
+        } catch (err) { failed++; }
+      }
+      showToast(`Verified ${ok}, ${failed} not found in Lightspeed`);
+      loadPartsCatalogSettings();
+    } catch (err) {
+      showToast(err.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Verify all';
+    }
+  });
+
   document.getElementById('part-add-btn').addEventListener('click', async () => {
     const sku = document.getElementById('part-new-sku').value.trim();
     const description = document.getElementById('part-new-desc').value.trim();
@@ -297,6 +490,190 @@ function renderSettings() {
   });
 }
 
+async function loadLightspeedEmployeeSetting() {
+  const selectEl = document.getElementById('lightspeed-employee-select');
+  if (!selectEl) return;
+  try {
+    const [employees, current] = await Promise.all([
+      api('/api/lightspeed/employees'),
+      api('/api/settings/lightspeed-employee'),
+    ]);
+    selectEl.innerHTML = `
+      <option value="">Select employee&hellip;</option>
+      ${employees.map(e => `<option value="${esc(e.id)}" ${current.id === e.id ? 'selected' : ''}>${esc(e.name)}</option>`).join('')}
+    `;
+    selectEl.disabled = false;
+    selectEl.addEventListener('change', async () => {
+      const chosen = employees.find(e => e.id === selectEl.value);
+      if (!chosen) return;
+      try {
+        await api('/api/settings/lightspeed-employee', { method: 'POST', body: JSON.stringify({ id: chosen.id, name: chosen.name }) });
+        showToast('Saved');
+      } catch (err) { showToast(err.message); }
+    });
+  } catch (err) {
+    selectEl.innerHTML = `<option value="">Couldn't load -- connect Lightspeed first</option>`;
+  }
+}
+
+async function loadLightspeedStatus() {
+  const el = document.getElementById('lightspeed-status');
+  if (!el) return;
+  try {
+    const status = await api('/api/lightspeed/status');
+    renderLightspeedStatus(status);
+  } catch (err) {
+    el.innerHTML = `<div class="empty-state">Couldn't load Lightspeed status.<br/>${esc(err.message)}</div>`;
+  }
+}
+
+function renderLightspeedStatus(status) {
+  const el = document.getElementById('lightspeed-status');
+  if (!status.configured) {
+    el.innerHTML = `<p class="hint-text">Not set up yet -- add LIGHTSPEED_CLIENT_ID, LIGHTSPEED_CLIENT_SECRET, and LIGHTSPEED_REDIRECT_URI to the server and redeploy before this can be connected.</p>`;
+    return;
+  }
+  if (status.connected) {
+    el.innerHTML = `
+      <p class="hint-text">Connected to Lightspeed account #${esc(status.account_id)}, since ${esc(status.connected_at)}.</p>
+      <button class="btn btn-secondary" id="lightspeed-disconnect-btn">Disconnect</button>
+    `;
+    document.getElementById('lightspeed-disconnect-btn').addEventListener('click', async () => {
+      if (!confirm('Disconnect this Lightspeed connection?')) return;
+      try {
+        await api('/api/lightspeed/disconnect', { method: 'POST' });
+        showToast('Lightspeed disconnected');
+        loadLightspeedStatus();
+      } catch (err) { showToast(err.message); }
+    });
+    return;
+  }
+  el.innerHTML = `
+    <p class="hint-text">Not connected yet.</p>
+    <button class="btn btn-primary" id="lightspeed-connect-btn">Connect to Lightspeed</button>
+  `;
+  document.getElementById('lightspeed-connect-btn').addEventListener('click', async () => {
+    try {
+      const { url } = await api('/api/lightspeed/connect-url');
+      window.location.href = url;
+    } catch (err) { showToast(err.message); }
+  });
+}
+
+let dealersEditingId = null;
+
+async function loadDealersSettings() {
+  const el = document.getElementById('dealers-list');
+  if (!el) return;
+  try {
+    const dealers = await api('/api/dealers');
+    renderDealersSettings(dealers);
+  } catch (err) {
+    el.innerHTML = `<div class="empty-state">Couldn't load dealers.<br/>${esc(err.message)}</div>`;
+  }
+}
+
+function renderDealersSettings(dealers) {
+  const el = document.getElementById('dealers-list');
+  if (!dealers.length) {
+    el.innerHTML = `<div class="empty-state">No dealers yet. Add one below.</div>`;
+    return;
+  }
+  el.innerHTML = dealers.map(d => {
+    if (d.id === dealersEditingId) {
+      return `
+        <div class="quote-line-row" data-id="${d.id}">
+          <input type="text" class="quote-line-desc dealer-edit-name" value="${esc(d.name)}" placeholder="Name" style="margin-bottom:6px" />
+          <div class="quote-line-controls">
+            <input type="text" class="dealer-edit-contact" value="${esc(d.contact)}" placeholder="Phone or email" />
+            <button type="button" class="btn btn-secondary btn-small dealer-save-btn" data-id="${d.id}">Save</button>
+            <button type="button" class="btn btn-ghost btn-small dealer-cancel-btn">Cancel</button>
+          </div>
+          <div class="section-label" style="margin-top:10px">Lightspeed customer</div>
+          ${d.lightspeed_customer_id ? `
+            <div class="ls-linked-chip">
+              <span>🔗 ${esc(d.lightspeed_customer_name)}</span>
+              <button type="button" class="btn btn-ghost btn-small dealer-ls-unlink-btn" data-id="${d.id}">Unlink</button>
+            </div>
+          ` : `
+            <input type="text" class="dealer-ls-search-input" placeholder="Search Lightspeed customers…" />
+            <div class="ls-search-results dealer-ls-search-results"></div>
+          `}
+        </div>
+      `;
+    }
+    return `
+      <div class="quote-line-row" data-id="${d.id}">
+        <div class="quote-line-desc" style="border:none;background:none;padding:0 0 4px;margin-bottom:0">${esc(d.name)}</div>
+        ${d.lightspeed_customer_id ? `<div class="hint-text">🔗 Lightspeed: ${esc(d.lightspeed_customer_name)}</div>` : ''}
+        <div class="quote-line-controls">
+          <span>${d.contact ? esc(d.contact) : '&mdash;'}</span>
+          <button type="button" class="btn btn-ghost btn-small dealer-link-btn" data-token="${esc(d.share_token)}" title="Copy this dealer's permanent history link">🔗 Link</button>
+          <button type="button" class="btn btn-ghost btn-small dealer-edit-btn" data-id="${d.id}">Edit</button>
+          <button type="button" class="quote-line-remove dealer-delete-btn" data-id="${d.id}" aria-label="Delete dealer">&times;</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  el.querySelectorAll('.dealer-ls-search-input').forEach(input => {
+    const row = input.closest('.quote-line-row');
+    const resultsEl = row.querySelector('.dealer-ls-search-results');
+    const dealerId = row.dataset.id;
+    wireLightspeedSearch(input, resultsEl, async (customer) => {
+      try {
+        await api(`/api/dealers/${dealerId}/lightspeed-link`, {
+          method: 'POST', body: JSON.stringify({ customer_id: customer.id, customer_name: customer.name })
+        });
+        showToast('Linked to Lightspeed');
+        loadDealersSettings();
+      } catch (err) { showToast(err.message); }
+    });
+  });
+  el.querySelectorAll('.dealer-ls-unlink-btn').forEach(btn => btn.addEventListener('click', async () => {
+    if (!confirm("Unlink this dealer from their Lightspeed customer record?")) return;
+    try {
+      await api(`/api/dealers/${btn.dataset.id}/lightspeed-unlink`, { method: 'POST' });
+      showToast('Unlinked');
+      loadDealersSettings();
+    } catch (err) { showToast(err.message); }
+  }));
+
+  el.querySelectorAll('.dealer-link-btn').forEach(btn => btn.addEventListener('click', async () => {
+    const url = `${location.origin}/share/dealer/${btn.dataset.token}`;
+    const ok = await copyToClipboard(url);
+    showToast(ok ? 'Link copied — send it to the dealer' : url);
+  }));
+  el.querySelectorAll('.dealer-edit-btn').forEach(btn => btn.addEventListener('click', () => {
+    dealersEditingId = Number(btn.dataset.id);
+    renderDealersSettings(dealers);
+  }));
+  el.querySelectorAll('.dealer-cancel-btn').forEach(btn => btn.addEventListener('click', () => {
+    dealersEditingId = null;
+    renderDealersSettings(dealers);
+  }));
+  el.querySelectorAll('.dealer-save-btn').forEach(btn => btn.addEventListener('click', async () => {
+    const row = btn.closest('.quote-line-row');
+    const name = row.querySelector('.dealer-edit-name').value.trim();
+    const contact = row.querySelector('.dealer-edit-contact').value.trim();
+    if (!name) { showToast('Enter a name'); return; }
+    try {
+      await api(`/api/dealers/${btn.dataset.id}`, { method: 'PUT', body: JSON.stringify({ name, contact }) });
+      dealersEditingId = null;
+      showToast('Dealer updated');
+      loadDealersSettings();
+    } catch (err) { showToast(err.message); }
+  }));
+  el.querySelectorAll('.dealer-delete-btn').forEach(btn => btn.addEventListener('click', async () => {
+    if (!confirm('Remove this dealer from the list? Existing service records keep their dealer name either way.')) return;
+    try {
+      await api(`/api/dealers/${btn.dataset.id}`, { method: 'DELETE' });
+      showToast('Dealer removed');
+      loadDealersSettings();
+    } catch (err) { showToast(err.message); }
+  }));
+}
+
 let partsCatalogEditingId = null;
 
 async function loadPartsCatalogSettings() {
@@ -331,18 +708,41 @@ function renderPartsCatalogSettings(parts) {
         </div>
       `;
     }
+    const verifyBadge = p.lightspeed_item_id
+      ? `<span class="part-verify-badge verified" title="Linked to a real Lightspeed item, last synced ${esc(p.lightspeed_synced_at || '')}">✓ Lightspeed</span>`
+      : `<span class="part-verify-badge unverified">Not verified</span>`;
     return `
       <div class="quote-line-row" data-id="${p.id}">
         <div class="quote-line-desc" style="border:none;background:none;padding:0 0 4px;margin-bottom:0">${esc(p.description)} ${p.sku ? `<span class="quote-line-sku">${esc(p.sku)}</span>` : ''}</div>
+        <div style="margin-bottom:6px">${verifyBadge}</div>
         <div class="quote-line-controls">
           <span>Cost ${fmtMoney(p.cost)}</span>
           <span class="quote-line-total">Retail ${fmtMoney(p.retail_price)}</span>
+          ${!p.lightspeed_item_id ? `<button type="button" class="btn btn-ghost btn-small part-verify-btn" data-id="${p.id}">Verify</button>` : ''}
           <button type="button" class="btn btn-ghost btn-small part-edit-btn" data-id="${p.id}">Edit</button>
           <button type="button" class="quote-line-remove part-delete-btn" data-id="${p.id}" aria-label="Delete part">&times;</button>
         </div>
       </div>
     `;
   }).join('');
+
+  el.querySelectorAll('.part-verify-btn').forEach(btn => btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    btn.textContent = 'Checking…';
+    try {
+      const result = await api(`/api/parts/${btn.dataset.id}/verify`, { method: 'POST' });
+      if (result.verified) {
+        showToast('Verified against Lightspeed');
+      } else {
+        showToast(result.reason || "Couldn't verify this part");
+      }
+      loadPartsCatalogSettings();
+    } catch (err) {
+      showToast(err.message);
+      btn.disabled = false;
+      btn.textContent = 'Verify';
+    }
+  }));
 
   el.querySelectorAll('.part-edit-btn').forEach(btn => btn.addEventListener('click', () => {
     partsCatalogEditingId = Number(btn.dataset.id);
@@ -396,13 +796,14 @@ async function renderBoard() {
   app.innerHTML = `
     ${topBarHtml('board')}
     <div class="board" id="board">
-      ${STAGE_ORDER.map(s => `
+      ${STAGE_ORDER.map((s, i) => `
         <div class="board-col">
           <div class="board-col-header" style="border-color:${STAGE_META[s].color}">
             <span>${STAGE_META[s].label}</span>
             <span class="board-col-count" id="count-${s}">&hellip;</span>
           </div>
           <div class="board-col-cards" id="col-${s}"></div>
+          ${i === 0 ? '<button class="fab-inline" id="fab-new-inline">+ Log new motor</button>' : ''}
         </div>
       `).join('')}
     </div>
@@ -410,6 +811,7 @@ async function renderBoard() {
   `;
   wireTopBar();
   document.getElementById('fab-new').addEventListener('click', () => renderForm(null));
+  document.getElementById('fab-new-inline').addEventListener('click', () => renderForm(null));
 
   try {
     const records = await api('/api/records');
@@ -570,12 +972,12 @@ async function loadRecords() {
       return `
         <div class="record-card" style="border-left-color:${meta.color}" data-id="${r.id}">
           <div class="record-card-top">
-            <span class="serial-chip">${esc(r.serial_number)}</span>
+            <span class="record-card-title">${esc(r.dealer_name) || '—'}</span>
             <span class="status-badge" style="background:${meta.color};color:#15171B">${meta.label}</span>
           </div>
           <div class="record-card-meta">
             ${r.brand ? `<span class="record-card-brand">${esc(r.brand)}${r.model ? ' ' + esc(r.model) : ''}</span>` : ''}
-            ${r.dealer_name ? `<span>&middot; ${esc(r.dealer_name)}</span>` : ''}
+            <span class="record-card-serial">&middot; ${esc(r.serial_number)}</span>
             ${r.date_received ? `<span>&middot; in ${esc(r.date_received)}</span>` : ''}
             ${r.image_count ? `<span>&middot; &#128247; ${r.image_count}</span>` : ''}
             ${quoteMiniBadge(r)}
@@ -617,6 +1019,7 @@ async function renderDetail(id) {
           <div class="section-label">${r.source_type === 'customer' ? 'Customer' : 'Dealer'}</div>
           <div class="detail-row"><span class="k">Sent by</span><span class="v">${esc(r.dealer_name) || '—'}</span></div>
           <div class="detail-row"><span class="k">Contact</span><span class="v">${esc(r.dealer_contact) || '—'}</span></div>
+          <div class="detail-row"><span class="k">Lightspeed</span><span class="v">${r.lightspeed_customer_id ? `🔗 ${esc(r.lightspeed_customer_name)}` : '<span class="hint-text" style="margin:0">Not linked</span>'}</span></div>
 
           <div class="section-label">Timeline</div>
           <div class="detail-row"><span class="k">Received</span><span class="v">${fmtDate(r.date_received)}</span></div>
@@ -636,6 +1039,7 @@ async function renderDetail(id) {
           ${quoteLineItemsReadOnlyHtml(r.line_items)}
           <div class="detail-row"><span class="k">Total</span><span class="v" style="font-weight:700">${fmtMoney(r.quote_amount)}</span></div>
           ${r.quote_notes ? `<div class="text-block">${esc(r.quote_notes)}</div>` : ''}
+          <div id="lightspeed-push-panel">${lightspeedPushPanelHtml(r)}</div>
           ` : ''}
 
           <div id="workflow-panel"></div>
@@ -657,6 +1061,33 @@ async function renderDetail(id) {
       const ok = await copyToClipboard(url);
       showToast(ok ? 'Customer link copied' : url);
     });
+
+    const pushBtn = document.getElementById('push-to-lightspeed-btn');
+    if (pushBtn) {
+      pushBtn.addEventListener('click', async () => {
+        if (!confirm(`Push this quote to Lightspeed for ${r.lightspeed_customer_name}? This creates a real Quote a salesperson can complete at checkout.`)) return;
+        pushBtn.disabled = true;
+        pushBtn.textContent = 'Pushing…';
+        try {
+          const res = await fetch(`${API}/api/records/${r.id}/push-to-lightspeed`, {
+            method: 'POST', headers: { Authorization: `Bearer ${TOKEN}` },
+          });
+          const data = await res.json();
+          if (!res.ok) {
+            const msg = data.problems && data.problems.length
+              ? `${data.error}:\n${data.problems.map(p => '- ' + p).join('\n')}`
+              : (data.error || 'Push failed');
+            throw new Error(msg);
+          }
+          showToast(`Pushed -- Quote #${data.lightspeed_quote_id}`);
+          renderDetail(r.id);
+        } catch (err) {
+          alert(err.message);
+          pushBtn.disabled = false;
+          pushBtn.textContent = 'Push to Lightspeed';
+        }
+      });
+    }
 
     renderPhotoSections(r);
     renderWorkflowPanel(r);
@@ -1053,6 +1484,150 @@ async function respondQuote(id, decision) {
 }
 
 // ---------- Form (new / edit) ----------
+// ---------- Sent by (dealer picker) ----------
+function updateSentByLayout() {
+  const checked = document.querySelector('input[name="f-source-type"]:checked');
+  const sourceType = checked ? checked.value : 'dealer';
+  const selectWrap = document.getElementById('f-dealer-select-wrap');
+  const nameWrap = document.getElementById('f-dealer-name-wrap');
+  const nameLabel = document.getElementById('f-dealer-name-label');
+  const selectEl = document.getElementById('f-dealer-select');
+  if (sourceType === 'customer') {
+    selectWrap.style.display = 'none';
+    nameWrap.style.display = '';
+    nameLabel.textContent = 'Name';
+  } else {
+    selectWrap.style.display = '';
+    nameLabel.textContent = 'New dealer name';
+    nameWrap.style.display = (selectEl.value === '__new__') ? '' : 'none';
+    // Dealer records link to Lightspeed via that dealer's own saved link
+    // (Settings -> Dealers), not a per-record search -- clear any stray
+    // link/search state left over from a moment spent in customer mode.
+    clearFormLightspeedLink();
+  }
+}
+
+function renderFormLightspeedChip() {
+  const chipEl = document.getElementById('f-lightspeed-linked-chip');
+  const idEl = document.getElementById('f-lightspeed-customer-id');
+  const nameEl = document.getElementById('f-lightspeed-customer-name');
+  if (!chipEl) return;
+  if (idEl.value) {
+    chipEl.innerHTML = `
+      <div class="ls-linked-chip">
+        <span>🔗 Linked to ${esc(nameEl.value)}</span>
+        <button type="button" class="btn btn-ghost btn-small" id="f-lightspeed-unlink-btn">Unlink</button>
+      </div>
+    `;
+    document.getElementById('f-lightspeed-unlink-btn').addEventListener('click', () => {
+      idEl.value = '';
+      nameEl.value = '';
+      renderFormLightspeedChip();
+    });
+  } else {
+    chipEl.innerHTML = '';
+  }
+}
+
+function clearFormLightspeedLink() {
+  document.getElementById('f-lightspeed-customer-id').value = '';
+  document.getElementById('f-lightspeed-customer-name').value = '';
+  renderFormLightspeedChip();
+  const resultsEl = document.getElementById('f-lightspeed-search-results');
+  if (resultsEl) resultsEl.innerHTML = '';
+}
+
+async function wireSentBySection(r) {
+  const selectEl = document.getElementById('f-dealer-select');
+  const nameInput = document.getElementById('f-dealer');
+  const contactInput = document.getElementById('f-contact');
+
+  document.querySelectorAll('input[name="f-source-type"]').forEach(radio => {
+    radio.addEventListener('change', updateSentByLayout);
+  });
+
+  try {
+    const dealers = await api('/api/dealers');
+    const currentName = (r.dealer_name || '').trim();
+    const match = r.source_type !== 'customer' && currentName
+      ? dealers.find(d => d.name.toLowerCase() === currentName.toLowerCase())
+      : null;
+
+    selectEl.innerHTML = `
+      <option value="">Select dealer&hellip;</option>
+      ${dealers.map(d => `<option value="${esc(d.name)}" ${match && match.id === d.id ? 'selected' : ''}>${esc(d.name)}</option>`).join('')}
+      <option value="__new__" ${!match && r.source_type !== 'customer' && currentName ? 'selected' : ''}>+ Add new dealer&hellip;</option>
+    `;
+    selectEl.disabled = false;
+
+    selectEl.addEventListener('change', () => {
+      if (selectEl.value === '__new__') {
+        nameInput.value = '';
+      } else if (selectEl.value) {
+        nameInput.value = '';
+        const chosen = dealers.find(d => d.name === selectEl.value);
+        if (chosen && chosen.contact) contactInput.value = chosen.contact;
+      }
+      updateSentByLayout();
+    });
+  } catch (err) {
+    selectEl.innerHTML = `<option value="__new__" selected>Couldn't load dealer list &mdash; type name below</option>`;
+    selectEl.disabled = true;
+  }
+
+  renderFormLightspeedChip();
+
+  // Direct-customer mode: typing the Name field itself live-searches
+  // Lightspeed (no separate search box) -- picking a result confirms the
+  // name and links it; continuing to type after a pick clears the link,
+  // since the name no longer necessarily matches who was selected.
+  const lsResultsEl = document.getElementById('f-lightspeed-search-results');
+  let lsSearchDebounce;
+  nameInput.addEventListener('input', () => {
+    const sourceType = document.querySelector('input[name="f-source-type"]:checked').value;
+    if (sourceType !== 'customer') return; // "new dealer name" entry -- not a Lightspeed search
+    document.getElementById('f-lightspeed-customer-id').value = '';
+    document.getElementById('f-lightspeed-customer-name').value = '';
+    renderFormLightspeedChip();
+    clearTimeout(lsSearchDebounce);
+    const q = nameInput.value.trim();
+    if (q.length < 2) { lsResultsEl.innerHTML = ''; return; }
+    lsSearchDebounce = setTimeout(async () => {
+      lsResultsEl.innerHTML = `<div class="hint-text">Searching Lightspeed…</div>`;
+      try {
+        const results = await api(`/api/lightspeed/customers?q=${encodeURIComponent(q)}`);
+        if (!results.length) {
+          lsResultsEl.innerHTML = `<div class="hint-text">No match in Lightspeed -- will save as a new name.</div>`;
+          return;
+        }
+        lsResultsEl.innerHTML = results.map(c => `
+          <div class="ls-customer-result" data-id="${esc(c.id)}">
+            <div style="font-weight:600">${esc(c.name)}${c.company ? ` <span class="hint-text">(${esc(c.company)})</span>` : ''}</div>
+            ${(c.phone || c.email) ? `<div class="hint-text">${[esc(c.phone), esc(c.email)].filter(Boolean).join(' &middot; ')}</div>` : ''}
+          </div>
+        `).join('');
+        lsResultsEl.querySelectorAll('.ls-customer-result').forEach(row => {
+          row.addEventListener('click', () => {
+            const chosen = results.find(c => String(c.id) === row.dataset.id);
+            nameInput.value = chosen.name;
+            document.getElementById('f-lightspeed-customer-id').value = chosen.id;
+            document.getElementById('f-lightspeed-customer-name').value = chosen.name;
+            if (!contactInput.value.trim() && (chosen.phone || chosen.email)) {
+              contactInput.value = chosen.phone || chosen.email;
+            }
+            lsResultsEl.innerHTML = '';
+            renderFormLightspeedChip();
+          });
+        });
+      } catch (err) {
+        lsResultsEl.innerHTML = `<div class="hint-text">Search failed: ${esc(err.message)}</div>`;
+      }
+    }, 300);
+  });
+
+  updateSentByLayout();
+}
+
 function renderForm(record) {
   const isEdit = !!record;
   pendingPhotos = [];
@@ -1072,6 +1647,30 @@ function renderForm(record) {
       </div>
       <div class="screen-body">
         <form id="record-form">
+          <div class="section-label">Sent by</div>
+          <div class="form-row-2">
+            <label class="radio-opt"><input type="radio" name="f-source-type" value="dealer" ${r.source_type !== 'customer' ? 'checked' : ''}/> Dealer</label>
+            <label class="radio-opt"><input type="radio" name="f-source-type" value="customer" ${r.source_type === 'customer' ? 'checked' : ''}/> Direct customer</label>
+          </div>
+          <div class="field" id="f-dealer-select-wrap">
+            <label>Dealer</label>
+            <select id="f-dealer-select" disabled>
+              <option value="">Loading dealers&hellip;</option>
+            </select>
+          </div>
+          <div class="field" id="f-dealer-name-wrap">
+            <label id="f-dealer-name-label">Name</label>
+            <input type="hidden" id="f-lightspeed-customer-id" value="${esc(r.lightspeed_customer_id || '')}" />
+            <input type="hidden" id="f-lightspeed-customer-name" value="${esc(r.lightspeed_customer_name || '')}" />
+            <input type="text" id="f-dealer" value="${esc(r.dealer_name)}" autocomplete="off" />
+            <div id="f-lightspeed-linked-chip"></div>
+            <div class="ls-search-results" id="f-lightspeed-search-results"></div>
+          </div>
+          <div class="field">
+            <label>Contact</label>
+            <input type="text" id="f-contact" value="${esc(r.dealer_contact)}" placeholder="Phone or email" />
+          </div>
+
           <div class="section-label">Motor</div>
           <div class="field">
             <label>Serial number *</label>
@@ -1098,20 +1697,6 @@ function renderForm(record) {
               <label>Model</label>
               <input type="text" id="f-model" value="${esc(r.model)}" />
             </div>
-          </div>
-
-          <div class="section-label">Sent by</div>
-          <div class="form-row-2">
-            <label class="radio-opt"><input type="radio" name="f-source-type" value="dealer" ${r.source_type !== 'customer' ? 'checked' : ''}/> Dealer</label>
-            <label class="radio-opt"><input type="radio" name="f-source-type" value="customer" ${r.source_type === 'customer' ? 'checked' : ''}/> Direct customer</label>
-          </div>
-          <div class="field">
-            <label>Name</label>
-            <input type="text" id="f-dealer" value="${esc(r.dealer_name)}" />
-          </div>
-          <div class="field">
-            <label>Contact</label>
-            <input type="text" id="f-contact" value="${esc(r.dealer_contact)}" placeholder="Phone or email" />
           </div>
 
           ${!isEdit ? `
@@ -1218,6 +1803,8 @@ function renderForm(record) {
     else renderBoard();
   });
 
+  wireSentBySection(r);
+
   if (!isEdit) {
     const onPendingPhotoChange = (e) => {
       Array.from(e.target.files).forEach(file => {
@@ -1286,16 +1873,30 @@ function renderForm(record) {
 
   document.getElementById('save-btn').addEventListener('click', async () => {
     const sourceTypeEl = document.querySelector('input[name="f-source-type"]:checked');
+    const sourceType = sourceTypeEl ? sourceTypeEl.value : 'dealer';
+    const dealerSelectEl = document.getElementById('f-dealer-select');
+    let dealerName;
+    let newDealerName = null;
+    if (sourceType === 'customer') {
+      dealerName = document.getElementById('f-dealer').value.trim();
+    } else if (dealerSelectEl && dealerSelectEl.value && dealerSelectEl.value !== '__new__') {
+      dealerName = dealerSelectEl.value;
+    } else {
+      dealerName = document.getElementById('f-dealer').value.trim();
+      if (dealerName) newDealerName = dealerName;
+    }
     const payload = {
       serial_number: document.getElementById('f-serial').value.trim(),
       brand: document.getElementById('f-brand').value,
       model: document.getElementById('f-model').value.trim(),
-      dealer_name: document.getElementById('f-dealer').value.trim(),
+      dealer_name: dealerName,
       dealer_contact: document.getElementById('f-contact').value.trim(),
-      source_type: sourceTypeEl ? sourceTypeEl.value : 'dealer',
+      source_type: sourceType,
       date_received: document.getElementById('f-date-received').value,
       issue_reported: document.getElementById('f-issue').value.trim(),
       notes: document.getElementById('f-notes').value.trim(),
+      lightspeed_customer_id: document.getElementById('f-lightspeed-customer-id').value || null,
+      lightspeed_customer_name: document.getElementById('f-lightspeed-customer-name').value || null,
     };
     if (isEdit) {
       payload.status = document.getElementById('f-status').value;
@@ -1315,6 +1916,12 @@ function renderForm(record) {
     if (!payload.brand) {
       showToast('Brand is required (Brose or Mahle)');
       return;
+    }
+    if (newDealerName) {
+      // Best-effort -- also adds a freshly-typed dealer name to the dealer database so it's
+      // pickable next time. A 409 (name already exists, e.g. differing only by case) is expected
+      // and fine to ignore; this must never block saving the actual service record.
+      try { await api('/api/dealers', { method: 'POST', body: JSON.stringify({ name: newDealerName }) }); } catch (err) { /* ignore */ }
     }
     try {
       if (isEdit) {
@@ -1383,8 +1990,23 @@ document.addEventListener('click', async (e) => {
 });
 
 // ---------- Boot ----------
+const lightspeedRedirectParam = new URLSearchParams(location.search).get('lightspeed_connected')
+  ? 'connected'
+  : new URLSearchParams(location.search).get('lightspeed_error') ? 'error' : null;
+if (lightspeedRedirectParam) {
+  history.replaceState(null, '', location.pathname);
+}
+
 if (TOKEN) {
-  renderBoard();
+  if (lightspeedRedirectParam === 'connected') {
+    renderSettings();
+    showToast('Lightspeed connected');
+  } else if (lightspeedRedirectParam === 'error') {
+    renderSettings();
+    showToast("Couldn't connect to Lightspeed -- please try again");
+  } else {
+    renderBoard();
+  }
 } else {
   renderLogin();
 }

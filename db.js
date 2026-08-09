@@ -44,6 +44,22 @@ db.exec(`
     value TEXT
   );
 
+  CREATE TABLE IF NOT EXISTS dealers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    contact TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS lightspeed_credentials (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    account_id TEXT,
+    access_token TEXT,
+    refresh_token TEXT,
+    expires_at TEXT,
+    connected_at TEXT
+  );
+
   CREATE TABLE IF NOT EXISTS parts_catalog (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     sku TEXT,
@@ -91,14 +107,34 @@ addColumnIfMissing('service_records', 'refurb_serial', 'TEXT');
 addColumnIfMissing('service_records', 'refurb_suggested', 'INTEGER DEFAULT 0');
 addColumnIfMissing('service_records', 'damage_found', 'TEXT');
 addColumnIfMissing('service_images', 'category', "TEXT DEFAULT 'other'");
+addColumnIfMissing('dealers', 'share_token', 'TEXT');
+addColumnIfMissing('dealers', 'lightspeed_customer_id', 'TEXT');
+addColumnIfMissing('dealers', 'lightspeed_customer_name', 'TEXT');
+addColumnIfMissing('parts_catalog', 'lightspeed_item_id', 'TEXT');
+addColumnIfMissing('parts_catalog', 'lightspeed_synced_at', 'TEXT');
+addColumnIfMissing('service_records', 'lightspeed_customer_id', 'TEXT');
+addColumnIfMissing('service_records', 'lightspeed_customer_name', 'TEXT');
+addColumnIfMissing('service_records', 'lightspeed_sale_id', 'TEXT');
+addColumnIfMissing('service_records', 'lightspeed_quote_id', 'TEXT');
+addColumnIfMissing('service_records', 'lightspeed_pushed_at', 'TEXT');
 
 db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_share_token ON service_records(share_token)`);
+db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_dealer_share_token ON dealers(share_token)`);
 
 // Backfill share_token for any pre-existing rows that don't have one yet
 const missingTokens = db.prepare('SELECT id FROM service_records WHERE share_token IS NULL').all();
 if (missingTokens.length) {
   const setToken = db.prepare('UPDATE service_records SET share_token = ? WHERE id = ?');
   missingTokens.forEach(r => setToken.run(crypto.randomBytes(12).toString('hex'), r.id));
+}
+
+// Same idea for dealers -- each dealer gets one permanent share link (their full
+// motor history), generated once here for anyone that predates this feature, and
+// at insert time (server.js) for every dealer added from now on.
+const missingDealerTokens = db.prepare('SELECT id FROM dealers WHERE share_token IS NULL').all();
+if (missingDealerTokens.length) {
+  const setDealerToken = db.prepare('UPDATE dealers SET share_token = ? WHERE id = ?');
+  missingDealerTokens.forEach(d => setDealerToken.run(crypto.randomBytes(12).toString('hex'), d.id));
 }
 
 // ---------- App settings (key/value) ----------
@@ -120,6 +156,26 @@ function setSetting(key, value) {
 if (getSetting('passcode') === null) {
   setSetting('passcode', process.env.APP_PASSCODE || 'changeme');
 }
+
+// One-time backfill: any dealer name already used on a real (source_type = 'dealer')
+// service record, but not yet in the dealers table, is added so the new dealer
+// picker isn't empty on first use. Idempotent (only inserts names not already present),
+// safe to leave running on every startup. Direct-customer records are deliberately
+// excluded -- those are personal names, not dealers to keep in this list.
+const existingDealerNames = new Set(
+  db.prepare('SELECT name FROM dealers').all().map(d => d.name.toLowerCase())
+);
+const historicalDealerNames = db.prepare(`
+  SELECT DISTINCT dealer_name FROM service_records
+  WHERE source_type = 'dealer' AND dealer_name IS NOT NULL AND trim(dealer_name) != ''
+`).all().map(r => r.dealer_name.trim());
+const insertDealer = db.prepare('INSERT INTO dealers (name) VALUES (?)');
+historicalDealerNames.forEach(name => {
+  if (!existingDealerNames.has(name.toLowerCase())) {
+    insertDealer.run(name);
+    existingDealerNames.add(name.toLowerCase());
+  }
+});
 
 // ---------- Seed the Brose parts catalog (idempotent -- skips SKUs already present) ----------
 // Pulled from Greg Minnaar Cycles' own Lightspeed inventory (PO Bridge's connection) on 2026-07-21,
