@@ -128,6 +128,15 @@ function normalizeLightspeedItem(item) {
 }
 
 const BRANDS = ['Brose', 'Mahle'];
+const PART_CATEGORIES = ['part', 'labour', 'postage'];
+// The dealer parts discount (20% off spares, never labour/postage) is
+// computed entirely client-side, once, the moment a dealer's quote pulls a
+// "part"-category item from the catalog (see the DEALER_PARTS_DISCOUNT
+// constant and wf-parts-search in app.js) -- unit_price arriving here is
+// already whatever the mechanic actually intends to charge, discounted or
+// not, same trust model this route already used before discounts existed.
+// The server's only job is to store category/original_unit_price alongside
+// it for the read-only "was Rx" display, never to recompute the discount.
 const STAGES = ['received', 'inspection', 'quoted', 'in_repair', 'completed', 'returned'];
 const QUOTE_STATUSES = ['not_sent', 'pending', 'approved', 'declined', 'skipped', 'refurb'];
 const IMAGE_CATEGORIES = ['intake', 'damage', 'repair', 'other'];
@@ -435,7 +444,10 @@ app.post('/api/records/:id/quote', authMiddleware, (req, res) => {
       sku: (li.sku || '').toString().slice(0, 100),
       description: (li.description || '').toString().slice(0, 300),
       unit_price: Number(li.unit_price),
-      quantity: Number(li.quantity) || 1
+      quantity: Number(li.quantity) || 1,
+      category: PART_CATEGORIES.includes(li.category) ? li.category : 'part',
+      original_unit_price: li.original_unit_price === undefined || li.original_unit_price === null || li.original_unit_price === ''
+        ? null : Number(li.original_unit_price),
     }));
     if (items.some(li => !li.description || isNaN(li.unit_price) || li.unit_price < 0 || li.quantity <= 0)) {
       return res.status(400).json({ error: 'Each line item needs a description, a valid unit price, and a positive quantity' });
@@ -459,10 +471,13 @@ app.post('/api/records/:id/quote', authMiddleware, (req, res) => {
 
   if (items) {
     db.prepare('DELETE FROM quote_line_items WHERE record_id = ?').run(req.params.id);
-    const insertLine = db.prepare(
-      'INSERT INTO quote_line_items (record_id, sku, description, unit_price, quantity) VALUES (?, ?, ?, ?, ?)'
-    );
-    items.forEach(li => insertLine.run(req.params.id, li.sku || null, li.description, li.unit_price, li.quantity));
+    const insertLine = db.prepare(`
+      INSERT INTO quote_line_items (record_id, sku, description, unit_price, quantity, category, original_unit_price)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    items.forEach(li => insertLine.run(
+      req.params.id, li.sku || null, li.description, li.unit_price, li.quantity, li.category, li.original_unit_price
+    ));
   }
 
   res.json(db.prepare('SELECT * FROM service_records WHERE id = ?').get(req.params.id));
@@ -643,22 +658,33 @@ app.get('/api/parts', authMiddleware, (req, res) => {
 });
 
 app.post('/api/parts', authMiddleware, (req, res) => {
-  const { sku, description, cost, retail_price } = req.body;
+  const { sku, description, cost, retail_price, category } = req.body;
   if (!description || !description.trim()) {
     return res.status(400).json({ error: 'Description is required' });
   }
+  if (category !== undefined && !PART_CATEGORIES.includes(category)) {
+    return res.status(400).json({ error: `category must be one of: ${PART_CATEGORIES.join(', ')}` });
+  }
   const result = db.prepare(
-    'INSERT INTO parts_catalog (sku, description, cost, retail_price) VALUES (?, ?, ?, ?)'
-  ).run((sku || '').trim() || null, description.trim(), cost === '' || cost === undefined ? null : Number(cost), retail_price === '' || retail_price === undefined ? null : Number(retail_price));
+    'INSERT INTO parts_catalog (sku, description, cost, retail_price, category) VALUES (?, ?, ?, ?, ?)'
+  ).run(
+    (sku || '').trim() || null, description.trim(),
+    cost === '' || cost === undefined ? null : Number(cost),
+    retail_price === '' || retail_price === undefined ? null : Number(retail_price),
+    category || 'part'
+  );
   res.status(201).json(db.prepare('SELECT * FROM parts_catalog WHERE id = ?').get(result.lastInsertRowid));
 });
 
 app.put('/api/parts/:id', authMiddleware, (req, res) => {
   const existing = db.prepare('SELECT * FROM parts_catalog WHERE id = ?').get(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Part not found' });
-  const { sku, description, cost, retail_price } = req.body;
+  const { sku, description, cost, retail_price, category } = req.body;
   if (!description || !description.trim()) {
     return res.status(400).json({ error: 'Description is required' });
+  }
+  if (category !== undefined && !PART_CATEGORIES.includes(category)) {
+    return res.status(400).json({ error: `category must be one of: ${PART_CATEGORIES.join(', ')}` });
   }
   const newSku = (sku || '').trim() || null;
   // Hand-editing the SKU invalidates any earlier Lightspeed verification --
@@ -667,7 +693,7 @@ app.put('/api/parts/:id', authMiddleware, (req, res) => {
   // alone doesn't touch it.
   const skuChanged = newSku !== existing.sku;
   db.prepare(`
-    UPDATE parts_catalog SET sku = ?, description = ?, cost = ?, retail_price = ?
+    UPDATE parts_catalog SET sku = ?, description = ?, cost = ?, retail_price = ?, category = ?
     ${skuChanged ? ', lightspeed_item_id = NULL, lightspeed_synced_at = NULL' : ''}
     WHERE id = ?
   `).run(
@@ -675,6 +701,7 @@ app.put('/api/parts/:id', authMiddleware, (req, res) => {
     description.trim(),
     cost === '' || cost === undefined ? null : Number(cost),
     retail_price === '' || retail_price === undefined ? null : Number(retail_price),
+    category || existing.category || 'part',
     req.params.id
   );
   res.json(db.prepare('SELECT * FROM parts_catalog WHERE id = ?').get(req.params.id));
@@ -710,18 +737,21 @@ app.get('/api/lightspeed/items', authMiddleware, async (req, res) => {
 });
 
 app.post('/api/parts/from-lightspeed', authMiddleware, (req, res) => {
-  const { lightspeed_item_id, sku, description, cost, retail_price } = req.body;
+  const { lightspeed_item_id, sku, description, cost, retail_price, category } = req.body;
   if (!lightspeed_item_id || !description || !description.trim()) {
     return res.status(400).json({ error: 'lightspeed_item_id and description are required' });
   }
+  if (category !== undefined && !PART_CATEGORIES.includes(category)) {
+    return res.status(400).json({ error: `category must be one of: ${PART_CATEGORIES.join(', ')}` });
+  }
   const result = db.prepare(`
-    INSERT INTO parts_catalog (sku, description, cost, retail_price, lightspeed_item_id, lightspeed_synced_at)
-    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    INSERT INTO parts_catalog (sku, description, cost, retail_price, lightspeed_item_id, lightspeed_synced_at, category)
+    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
   `).run(
     (sku || '').trim() || null, description.trim(),
     cost === undefined || cost === null || cost === '' ? null : Number(cost),
     retail_price === undefined || retail_price === null || retail_price === '' ? null : Number(retail_price),
-    String(lightspeed_item_id)
+    String(lightspeed_item_id), category || 'part'
   );
   res.status(201).json(db.prepare('SELECT * FROM parts_catalog WHERE id = ?').get(result.lastInsertRowid));
 });
@@ -1210,7 +1240,7 @@ app.get('/api/share/:token', (req, res) => {
     payload.quote_amount = record.quote_amount;
     payload.quote_status = record.quote_status;
     payload.line_items = db.prepare(
-      'SELECT sku, description, unit_price, quantity FROM quote_line_items WHERE record_id = ? ORDER BY id ASC'
+      'SELECT sku, description, unit_price, quantity, category, original_unit_price FROM quote_line_items WHERE record_id = ? ORDER BY id ASC'
     ).all(record.id);
   }
   res.json(payload);

@@ -119,6 +119,22 @@ addColumnIfMissing('service_records', 'lightspeed_sale_id', 'TEXT');
 addColumnIfMissing('service_records', 'lightspeed_quote_id', 'TEXT');
 addColumnIfMissing('service_records', 'lightspeed_pushed_at', 'TEXT');
 addColumnIfMissing('service_records', 'lightspeed_sale_completed_at', 'TEXT');
+addColumnIfMissing('parts_catalog', 'category', "TEXT NOT NULL DEFAULT 'part'");
+addColumnIfMissing('quote_line_items', 'category', "TEXT DEFAULT 'part'");
+addColumnIfMissing('quote_line_items', 'original_unit_price', 'NUMERIC');
+
+// One-time backfill: the two known labour SKUs already in the catalog
+// (added before "category" existed) are real service charges, not spares --
+// mark them explicitly rather than leaving them defaulted to 'part', which
+// would otherwise make them wrongly eligible for the dealer parts discount.
+// Gated on a flag in app_settings (not just "category = 'part'") so this
+// runs exactly once, ever -- otherwise it would silently re-flip either SKU
+// back to 'labour' on every restart even after a deliberate manual
+// correction to 'part' later.
+if (!db.prepare(`SELECT value FROM app_settings WHERE key = 'backfilled_labour_skus_v1'`).get()) {
+  db.prepare(`UPDATE parts_catalog SET category = 'labour' WHERE sku IN ('BROSEB', 'BROSEC')`).run();
+  db.prepare(`INSERT INTO app_settings (key, value) VALUES ('backfilled_labour_skus_v1', '1')`).run();
+}
 
 db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_share_token ON service_records(share_token)`);
 db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_dealer_share_token ON dealers(share_token)`);

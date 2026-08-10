@@ -40,7 +40,7 @@ function quoteLineItemsReadOnlyHtml(items) {
       ${items.map(li => `
         <div class="quote-line-readonly-row">
           <span>${esc(li.description)}${li.sku ? ` <span class="quote-line-sku">${esc(li.sku)}</span>` : ''}</span>
-          <span>${li.quantity} &times; ${fmtMoney(li.unit_price)}</span>
+          <span>${li.quantity} &times; ${li.original_unit_price ? `<span class="discount-strike">${fmtMoney(li.original_unit_price)}</span>` : ''}${fmtMoney(li.unit_price)}${li.original_unit_price ? `<span class="discount-badge">dealer discount</span>` : ''}</span>
           <span>${fmtMoney(li.unit_price * li.quantity)}</span>
         </div>
       `).join('')}

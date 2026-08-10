@@ -6,6 +6,14 @@ let pendingPhotos = []; // { file, url } staged before first save on new record
 let activeTab = 'board';
 
 const BRANDS = ['Brose', 'Mahle'];
+const PART_CATEGORIES = { part: 'Part', labour: 'Labour', postage: 'Postage' };
+// Dealers get this automatic discount on spares only -- never on labour or
+// postage, and never for a direct customer. Applied once, the moment a
+// dealer's quote pulls a "part"-category item from the catalog (see
+// renderPartsResults' click handler below) -- after that it's just an
+// editable price like any other line, so editing it later never re-applies
+// or stacks the discount again.
+const DEALER_PARTS_DISCOUNT = 0.20;
 
 const STAGE_META = {
   received:    { label: 'Received',    color: '#5B8DEF' },
@@ -112,7 +120,7 @@ function quoteLineItemsReadOnlyHtml(items) {
       ${items.map(li => `
         <div class="quote-line-readonly-row">
           <span>${esc(li.description)}${li.sku ? ` <span class="quote-line-sku">${esc(li.sku)}</span>` : ''}</span>
-          <span>${li.quantity} &times; ${fmtMoney(li.unit_price)}</span>
+          <span>${li.quantity} &times; ${li.original_unit_price ? `<span class="discount-strike">${fmtMoney(li.original_unit_price)}</span>` : ''}${fmtMoney(li.unit_price)}${li.original_unit_price ? `<span class="discount-badge">dealer discount</span>` : ''}</span>
           <span>${fmtMoney(li.unit_price * li.quantity)}</span>
         </div>
       `).join('')}
@@ -404,6 +412,13 @@ function renderSettings() {
               <input type="number" step="0.01" id="part-new-retail" />
             </div>
           </div>
+          <div class="field">
+            <label>Category</label>
+            <select id="part-new-category">
+              ${Object.entries(PART_CATEGORIES).map(([val, label]) => `<option value="${val}">${label}</option>`).join('')}
+            </select>
+          </div>
+          <p class="hint-text" style="margin-top:0">Dealers get an automatic ${DEALER_PARTS_DISCOUNT * 100}% discount on Parts -- never on Labour or Postage.</p>
           <button class="btn btn-secondary" id="part-add-btn">Add part</button>
         </div>
       </div>
@@ -498,9 +513,10 @@ function renderSettings() {
     const description = document.getElementById('part-new-desc').value.trim();
     const cost = document.getElementById('part-new-cost').value;
     const retail_price = document.getElementById('part-new-retail').value;
+    const category = document.getElementById('part-new-category').value;
     if (!description) { showToast('Enter a description'); return; }
     try {
-      await api('/api/parts', { method: 'POST', body: JSON.stringify({ sku, description, cost, retail_price }) });
+      await api('/api/parts', { method: 'POST', body: JSON.stringify({ sku, description, cost, retail_price, category }) });
       document.getElementById('part-new-sku').value = '';
       document.getElementById('part-new-desc').value = '';
       document.getElementById('part-new-cost').value = '';
@@ -747,6 +763,9 @@ function renderPartsCatalogSettings(parts) {
           <div class="quote-line-controls" style="margin-top:6px">
             <input type="number" class="quote-line-price part-edit-cost" value="${p.cost}" step="0.01" placeholder="Cost" />
             <input type="number" class="quote-line-price part-edit-retail" value="${p.retail_price}" step="0.01" placeholder="Retail" />
+            <select class="part-edit-category">
+              ${Object.entries(PART_CATEGORIES).map(([val, label]) => `<option value="${val}" ${p.category === val ? 'selected' : ''}>${label}</option>`).join('')}
+            </select>
             <button type="button" class="btn btn-secondary btn-small part-save-btn" data-id="${p.id}">Save</button>
             <button type="button" class="btn btn-ghost btn-small part-cancel-btn">Cancel</button>
           </div>
@@ -756,10 +775,11 @@ function renderPartsCatalogSettings(parts) {
     const verifyBadge = p.lightspeed_item_id
       ? `<span class="part-verify-badge verified" title="Linked to a real Lightspeed item, last synced ${esc(p.lightspeed_synced_at || '')}">✓ Lightspeed</span>`
       : `<span class="part-verify-badge unverified">Not verified</span>`;
+    const categoryBadge = `<span class="part-category-badge part-category-${p.category || 'part'}">${esc(PART_CATEGORIES[p.category] || 'Part')}</span>`;
     return `
       <div class="quote-line-row" data-id="${p.id}">
         <div class="quote-line-desc" style="border:none;background:none;padding:0 0 4px;margin-bottom:0">${esc(p.description)} ${p.sku ? `<span class="quote-line-sku">${esc(p.sku)}</span>` : ''}</div>
-        <div style="margin-bottom:6px">${verifyBadge}</div>
+        <div style="margin-bottom:6px">${verifyBadge} ${categoryBadge}</div>
         <div class="quote-line-controls">
           <span>Cost ${fmtMoney(p.cost)}</span>
           <span class="quote-line-total">Retail ${fmtMoney(p.retail_price)}</span>
@@ -803,9 +823,10 @@ function renderPartsCatalogSettings(parts) {
     const description = row.querySelector('.part-edit-desc').value.trim();
     const cost = row.querySelector('.part-edit-cost').value;
     const retail_price = row.querySelector('.part-edit-retail').value;
+    const category = row.querySelector('.part-edit-category').value;
     if (!description) { showToast('Enter a description'); return; }
     try {
-      await api(`/api/parts/${btn.dataset.id}`, { method: 'PUT', body: JSON.stringify({ sku, description, cost, retail_price }) });
+      await api(`/api/parts/${btn.dataset.id}`, { method: 'PUT', body: JSON.stringify({ sku, description, cost, retail_price, category }) });
       partsCatalogEditingId = null;
       showToast('Part updated');
       loadPartsCatalogSettings();
@@ -1438,9 +1459,14 @@ function renderWorkflowPanel(r) {
             <input type="text" class="quote-line-desc" data-idx="${i}" value="${esc(li.description)}" placeholder="Description" />
             <div class="quote-line-controls">
               ${li.sku ? `<span class="quote-line-sku">${esc(li.sku)}</span>` : ''}
+              <select class="quote-line-category" data-idx="${i}">
+                ${Object.entries(PART_CATEGORIES).map(([val, label]) => `<option value="${val}" ${li.category === val ? 'selected' : ''}>${label}</option>`).join('')}
+              </select>
               <input type="number" class="quote-line-qty" data-idx="${i}" value="${li.quantity}" min="0.01" step="0.01" />
               <span>&times;</span>
+              ${li.original_unit_price ? `<span class="discount-strike">${fmtMoney(li.original_unit_price)}</span>` : ''}
               <input type="number" class="quote-line-price" data-idx="${i}" value="${li.unit_price}" min="0" step="0.01" />
+              ${li.original_unit_price ? `<span class="discount-badge">${DEALER_PARTS_DISCOUNT * 100}% off</span>` : ''}
               <span class="quote-line-total">${fmtMoney((Number(li.unit_price) || 0) * (Number(li.quantity) || 0))}</span>
               <button type="button" class="quote-line-remove" data-idx="${i}" aria-label="Remove line">&times;</button>
             </div>
@@ -1452,16 +1478,27 @@ function renderWorkflowPanel(r) {
             quoteLineItems[Number(e.target.dataset.idx)].description = e.target.value;
           });
         });
+        container.querySelectorAll('.quote-line-category').forEach(sel => {
+          sel.addEventListener('change', (e) => {
+            quoteLineItems[Number(e.target.dataset.idx)].category = e.target.value;
+          });
+        });
         container.querySelectorAll('.quote-line-qty, .quote-line-price').forEach(inp => {
           inp.addEventListener('input', (e) => {
             const idx = Number(e.target.dataset.idx);
             const key = e.target.classList.contains('quote-line-qty') ? 'quantity' : 'unit_price';
             quoteLineItems[idx][key] = Number(e.target.value) || 0;
+            // Editing the price by hand is a deliberate override -- the
+            // struck-through "original" figure and discount badge no longer
+            // apply to whatever's now typed in, so drop them rather than
+            // leave a stale, misleading annotation next to a hand-edited price.
+            if (key === 'unit_price') quoteLineItems[idx].original_unit_price = null;
             const row = e.target.closest('.quote-line-row');
             row.querySelector('.quote-line-total').textContent = fmtMoney(
               (Number(quoteLineItems[idx].unit_price) || 0) * (Number(quoteLineItems[idx].quantity) || 0)
             );
             updateQuoteTotal();
+            if (key === 'unit_price') renderQuoteLineItems();
           });
         });
         container.querySelectorAll('.quote-line-remove').forEach(btn => {
@@ -1494,7 +1531,20 @@ function renderWorkflowPanel(r) {
         resultsEl.querySelectorAll('.parts-result-row').forEach(row => {
           row.addEventListener('click', () => {
             const p = matches[Number(row.dataset.idx)];
-            quoteLineItems.push({ sku: p.sku || '', description: p.description, unit_price: Number(p.retail_price) || 0, quantity: 1 });
+            const retailPrice = Number(p.retail_price) || 0;
+            const category = p.category || 'part';
+            // The one and only place the dealer parts discount is ever
+            // computed -- once, here, at the moment a real spare is pulled
+            // from the catalog into a dealer's quote. Never re-applied
+            // afterward, so editing the price later can't stack a second
+            // discount on top.
+            const isDealer = r.source_type !== 'customer';
+            const discounted = isDealer && category === 'part';
+            quoteLineItems.push({
+              sku: p.sku || '', description: p.description, quantity: 1, category,
+              unit_price: discounted ? Math.round(retailPrice * (1 - DEALER_PARTS_DISCOUNT) * 100) / 100 : retailPrice,
+              original_unit_price: discounted ? retailPrice : null,
+            });
             renderQuoteLineItems();
             updateQuoteTotal();
             document.getElementById('wf-parts-search').value = '';
@@ -1507,7 +1557,7 @@ function renderWorkflowPanel(r) {
 
       document.getElementById('wf-parts-search').addEventListener('input', (e) => renderPartsResults(e.target.value));
       document.getElementById('wf-add-custom-line').addEventListener('click', () => {
-        quoteLineItems.push({ sku: '', description: '', unit_price: 0, quantity: 1 });
+        quoteLineItems.push({ sku: '', description: '', unit_price: 0, quantity: 1, category: 'part', original_unit_price: null });
         renderQuoteLineItems();
         updateQuoteTotal();
       });
