@@ -35,6 +35,27 @@ const LIGHTSPEED_API_BASE = 'https://api.lightspeedapp.com/API/V3';
 // for the identical purpose (see app/routers/lightspeed_oauth.py there).
 const pendingLightspeedState = new Set();
 
+// Retries a Lightspeed API call on 429 (rate limited) or a transient 5xx,
+// same idea PO Bridge's own lightspeed_client.py already relies on for this
+// exact API. Lightspeed's rate limit is a leaky bucket scoped to the whole
+// account, not per API key/app -- so Motor Tracker's own searches can get
+// throttled by traffic that has nothing to do with it (PO Bridge polling the
+// same account, or just several keystrokes firing search requests close
+// together) and the right fix is to back off and retry, not fail outright.
+// Honors a real Retry-After header when Lightspeed sends one.
+async function fetchLightspeed(url, options = {}, maxRetries = 4) {
+  let lastRes;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    lastRes = await fetch(url, options);
+    if (lastRes.status !== 429 && lastRes.status < 500) return lastRes;
+    if (attempt === maxRetries) return lastRes;
+    const retryAfter = lastRes.headers.get('Retry-After');
+    const waitMs = retryAfter ? Number(retryAfter) * 1000 : Math.min(1000 * (attempt + 1), 5000);
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+  }
+  return lastRes;
+}
+
 // Returns a currently-valid access token, refreshing it first if it's within
 // 2 minutes of expiring (same safety margin PO Bridge itself uses for this
 // exact class of problem). A refresh response may omit refresh_token
@@ -52,7 +73,7 @@ async function getValidLightspeedToken() {
   if (new Date(creds.expires_at).getTime() > Date.now() + safetyMarginMs) {
     return { accessToken: creds.access_token, accountId: creds.account_id };
   }
-  const tokenRes = await fetch(LIGHTSPEED_TOKEN_URL, {
+  const tokenRes = await fetchLightspeed(LIGHTSPEED_TOKEN_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -180,20 +201,30 @@ const upload = multer({
 });
 
 // ---------- Service records ----------
+// dealer_alias is resolved fresh on every read (a LEFT JOIN by name, never
+// stored on the record itself) so editing a dealer's alias in Settings takes
+// effect everywhere immediately, including on already-existing records --
+// unlike the Lightspeed customer link (section above), there's no
+// correctness reason to freeze this at write time, it's purely cosmetic.
 app.get('/api/records', authMiddleware, (req, res) => {
   const { search, status } = req.query;
-  let query = 'SELECT * FROM service_records WHERE 1=1';
+  let query = `
+    SELECT sr.*, d.alias AS dealer_alias
+    FROM service_records sr
+    LEFT JOIN dealers d ON d.name = sr.dealer_name COLLATE NOCASE
+    WHERE 1=1
+  `;
   const params = [];
   if (search) {
-    query += ' AND (serial_number LIKE ? OR dealer_name LIKE ? OR brand LIKE ?)';
+    query += ' AND (sr.serial_number LIKE ? OR sr.dealer_name LIKE ? OR sr.brand LIKE ?)';
     const term = `%${search}%`;
     params.push(term, term, term);
   }
   if (status) {
-    query += ' AND status = ?';
+    query += ' AND sr.status = ?';
     params.push(status);
   }
-  query += ' ORDER BY created_at DESC';
+  query += ' ORDER BY sr.created_at DESC';
   const records = db.prepare(query).all(...params);
 
   const imageCountStmt = db.prepare('SELECT COUNT(*) as count FROM service_images WHERE record_id = ?');
@@ -205,7 +236,12 @@ app.get('/api/records', authMiddleware, (req, res) => {
 });
 
 app.get('/api/records/:id', authMiddleware, (req, res) => {
-  const record = db.prepare('SELECT * FROM service_records WHERE id = ?').get(req.params.id);
+  const record = db.prepare(`
+    SELECT sr.*, d.alias AS dealer_alias
+    FROM service_records sr
+    LEFT JOIN dealers d ON d.name = sr.dealer_name COLLATE NOCASE
+    WHERE sr.id = ?
+  `).get(req.params.id);
   if (!record) return res.status(404).json({ error: 'Record not found' });
   const images = db.prepare('SELECT * FROM service_images WHERE record_id = ? ORDER BY created_at ASC').all(req.params.id);
   const line_items = db.prepare('SELECT * FROM quote_line_items WHERE record_id = ? ORDER BY id ASC').all(req.params.id);
@@ -502,7 +538,7 @@ app.get('/api/dealers', authMiddleware, (req, res) => {
 });
 
 app.post('/api/dealers', authMiddleware, (req, res) => {
-  const { name, contact, lightspeed_customer_id, lightspeed_customer_name } = req.body;
+  const { name, contact, lightspeed_customer_id, lightspeed_customer_name, alias } = req.body;
   if (!name || !name.trim()) {
     return res.status(400).json({ error: 'Dealer name is required' });
   }
@@ -514,11 +550,12 @@ app.post('/api/dealers', authMiddleware, (req, res) => {
   // customer search (Settings > Dealers > "Add from Lightspeed") instead of
   // typed manually, so it's already linked with no separate step needed.
   const result = db.prepare(`
-    INSERT INTO dealers (name, contact, share_token, lightspeed_customer_id, lightspeed_customer_name)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO dealers (name, contact, share_token, lightspeed_customer_id, lightspeed_customer_name, alias)
+    VALUES (?, ?, ?, ?, ?, ?)
   `).run(
     name.trim(), (contact || '').trim() || null, crypto.randomBytes(12).toString('hex'),
-    lightspeed_customer_id ? String(lightspeed_customer_id) : null, lightspeed_customer_name || null
+    lightspeed_customer_id ? String(lightspeed_customer_id) : null, lightspeed_customer_name || null,
+    (alias || '').trim() || null
   );
   res.status(201).json(db.prepare('SELECT * FROM dealers WHERE id = ?').get(result.lastInsertRowid));
 });
@@ -526,14 +563,14 @@ app.post('/api/dealers', authMiddleware, (req, res) => {
 app.put('/api/dealers/:id', authMiddleware, (req, res) => {
   const existing = db.prepare('SELECT * FROM dealers WHERE id = ?').get(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Dealer not found' });
-  const { name, contact } = req.body;
+  const { name, contact, alias } = req.body;
   if (!name || !name.trim()) {
     return res.status(400).json({ error: 'Dealer name is required' });
   }
   const dup = db.prepare('SELECT * FROM dealers WHERE name = ? COLLATE NOCASE AND id != ?').get(name.trim(), req.params.id);
   if (dup) return res.status(409).json({ error: 'A dealer with that name already exists' });
-  db.prepare('UPDATE dealers SET name = ?, contact = ? WHERE id = ?').run(
-    name.trim(), (contact || '').trim() || null, req.params.id
+  db.prepare('UPDATE dealers SET name = ?, contact = ?, alias = ? WHERE id = ?').run(
+    name.trim(), (contact || '').trim() || null, (alias || '').trim() || null, req.params.id
   );
   res.json(db.prepare('SELECT * FROM dealers WHERE id = ?').get(req.params.id));
 });
@@ -575,7 +612,7 @@ app.get('/api/lightspeed/customers', authMiddleware, async (req, res) => {
     const orClause = `firstName%3D~,${likeVal}|lastName%3D~,${likeVal}|company%3D~,${likeVal}`;
     const rel = encodeURIComponent('["Contact"]');
     const url = `${LIGHTSPEED_API_BASE}/Account/${accountId}/Customer.json?or=${orClause}&load_relations=${rel}&limit=15`;
-    const lsRes = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+    const lsRes = await fetchLightspeed(url, { headers: { Authorization: `Bearer ${accessToken}` } });
     if (!lsRes.ok) throw new Error(`Lightspeed search failed: ${lsRes.status} ${await lsRes.text()}`);
     const data = await lsRes.json();
     const raw = data.Customer ? (Array.isArray(data.Customer) ? data.Customer : [data.Customer]) : [];
@@ -662,7 +699,7 @@ app.get('/api/lightspeed/items', authMiddleware, async (req, res) => {
     const likeVal = encodeURIComponent(`%${q}%`);
     const orClause = `description%3D~,${likeVal}|manufacturerSku%3D~,${likeVal}`;
     const url = `${LIGHTSPEED_API_BASE}/Account/${accountId}/Item.json?or=${orClause}&limit=15`;
-    const lsRes = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+    const lsRes = await fetchLightspeed(url, { headers: { Authorization: `Bearer ${accessToken}` } });
     if (!lsRes.ok) throw new Error(`Lightspeed item search failed: ${lsRes.status} ${await lsRes.text()}`);
     const data = await lsRes.json();
     const raw = data.Item ? (Array.isArray(data.Item) ? data.Item : [data.Item]) : [];
@@ -704,7 +741,7 @@ app.post('/api/parts/:id/verify', authMiddleware, async (req, res) => {
   try {
     const { accessToken, accountId } = await getValidLightspeedToken();
     const url = `${LIGHTSPEED_API_BASE}/Account/${accountId}/Item.json?manufacturerSku=${encodeURIComponent(part.sku)}`;
-    const lsRes = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+    const lsRes = await fetchLightspeed(url, { headers: { Authorization: `Bearer ${accessToken}` } });
     if (!lsRes.ok) throw new Error(`Lightspeed lookup failed: ${lsRes.status} ${await lsRes.text()}`);
     const data = await lsRes.json();
     const raw = data.Item ? (Array.isArray(data.Item) ? data.Item : [data.Item]) : [];
@@ -908,7 +945,7 @@ app.get('/oauth/lightspeed/callback', async (req, res) => {
   }
   pendingLightspeedState.delete(state);
   try {
-    const tokenRes = await fetch(LIGHTSPEED_TOKEN_URL, {
+    const tokenRes = await fetchLightspeed(LIGHTSPEED_TOKEN_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
@@ -922,7 +959,7 @@ app.get('/oauth/lightspeed/callback', async (req, res) => {
     if (!tokenRes.ok) throw new Error(`Token exchange failed: ${tokenRes.status} ${await tokenRes.text()}`);
     const tokenData = await tokenRes.json();
 
-    const accountRes = await fetch(`${LIGHTSPEED_API_BASE}/Account.json`, {
+    const accountRes = await fetchLightspeed(`${LIGHTSPEED_API_BASE}/Account.json`, {
       headers: { Authorization: `Bearer ${tokenData.access_token}` },
     });
     if (!accountRes.ok) throw new Error(`Account lookup failed: ${accountRes.status} ${await accountRes.text()}`);
@@ -958,7 +995,7 @@ app.post('/api/lightspeed/disconnect', authMiddleware, (req, res) => {
 app.get('/api/lightspeed/employees', authMiddleware, async (req, res) => {
   try {
     const { accessToken, accountId } = await getValidLightspeedToken();
-    const lsRes = await fetch(`${LIGHTSPEED_API_BASE}/Account/${accountId}/Employee.json?limit=100`, {
+    const lsRes = await fetchLightspeed(`${LIGHTSPEED_API_BASE}/Account/${accountId}/Employee.json?limit=100`, {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
     if (!lsRes.ok) throw new Error(`Lightspeed employee lookup failed: ${lsRes.status}`);
@@ -1041,19 +1078,19 @@ app.post('/api/records/:id/push-to-lightspeed', authMiddleware, async (req, res)
     const authHeaders = { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' };
     const acct = (path) => `${LIGHTSPEED_API_BASE}/Account/${accountId}/${path}`;
 
-    const shopRes = await fetch(acct('Shop.json'), { headers: authHeaders });
+    const shopRes = await fetchLightspeed(acct('Shop.json'), { headers: authHeaders });
     if (!shopRes.ok) throw new Error(`Couldn't look up the Lightspeed shop: ${shopRes.status}`);
     const shopData = await shopRes.json();
     const shop = Array.isArray(shopData.Shop) ? shopData.Shop[0] : shopData.Shop;
     if (!shop) throw new Error('No Lightspeed shop found on this account');
 
-    const registerRes = await fetch(acct('Register.json'), { headers: authHeaders });
+    const registerRes = await fetchLightspeed(acct('Register.json'), { headers: authHeaders });
     if (!registerRes.ok) throw new Error(`Couldn't look up the Lightspeed register: ${registerRes.status}`);
     const registerData = await registerRes.json();
     const register = Array.isArray(registerData.Register) ? registerData.Register[0] : registerData.Register;
     if (!register) throw new Error('No Lightspeed register found on this account');
 
-    const saleRes = await fetch(acct('Sale.json'), {
+    const saleRes = await fetchLightspeed(acct('Sale.json'), {
       method: 'POST', headers: authHeaders,
       body: JSON.stringify({
         customerID: record.lightspeed_customer_id, employeeID: employeeId,
@@ -1064,13 +1101,13 @@ app.post('/api/records/:id/push-to-lightspeed', authMiddleware, async (req, res)
     const saleData = await saleRes.json();
     const saleId = saleData.Sale.saleID;
 
-    const linesRes = await fetch(acct(`Sale/${saleId}.json`), {
+    const linesRes = await fetchLightspeed(acct(`Sale/${saleId}.json`), {
       method: 'PUT', headers: authHeaders,
       body: JSON.stringify({ SaleLines: { SaleLine: resolvedLines } }),
     });
     if (!linesRes.ok) throw new Error(`Couldn't add line items: ${linesRes.status} ${await linesRes.text()}`);
 
-    const quoteRes = await fetch(acct('Quote.json'), {
+    const quoteRes = await fetchLightspeed(acct('Quote.json'), {
       method: 'POST', headers: authHeaders,
       body: JSON.stringify({ saleID: saleId, employeeID: employeeId, notes: record.quote_notes || '' }),
     });
@@ -1110,7 +1147,7 @@ app.post('/api/records/check-lightspeed-invoices', authMiddleware, async (req, r
     let becameInvoice = 0;
     await Promise.all(pending.map(async (record) => {
       try {
-        const lsRes = await fetch(`${LIGHTSPEED_API_BASE}/Account/${accountId}/Sale/${record.lightspeed_sale_id}.json`, {
+        const lsRes = await fetchLightspeed(`${LIGHTSPEED_API_BASE}/Account/${accountId}/Sale/${record.lightspeed_sale_id}.json`, {
           headers: authHeaders,
         });
         if (!lsRes.ok) return;
@@ -1201,7 +1238,7 @@ app.get('/api/share/dealer/:token', (req, res) => {
   `).all(dealer.name);
 
   res.json({
-    dealer_name: dealer.name,
+    dealer_name: dealer.alias || dealer.name,
     records: records.map((r, i) => ({ ...r, is_latest: i === 0 }))
   });
 });

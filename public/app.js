@@ -180,7 +180,7 @@ function wireLightspeedSearch(inputEl, resultsEl, onSelect) {
       } catch (err) {
         resultsEl.innerHTML = `<div class="hint-text">Search failed: ${esc(err.message)}</div>`;
       }
-    }, 300);
+    }, 450);
   });
 }
 
@@ -218,7 +218,7 @@ function wireLightspeedItemSearch(inputEl, resultsEl, onSelect) {
       } catch (err) {
         resultsEl.innerHTML = `<div class="hint-text">Search failed: ${esc(err.message)}</div>`;
       }
-    }, 300);
+    }, 450);
   });
 }
 
@@ -348,7 +348,7 @@ function renderSettings() {
         <div class="workflow-card" style="margin-top:12px">
           <div class="section-label" style="margin-top:0">Add from Lightspeed</div>
           <p class="hint-text" style="margin-top:0">Search your real Lightspeed customers -- picking one creates the dealer already linked, no separate Link step needed.</p>
-          <input type="text" id="dealer-ls-add-search-input" placeholder="Search Lightspeed customers&hellip;" />
+          <input type="text" class="ls-search-input" id="dealer-ls-add-search-input" placeholder="Search Lightspeed customers&hellip;" autocomplete="off" />
           <div class="ls-search-results" id="dealer-ls-add-search-results"></div>
         </div>
 
@@ -357,6 +357,10 @@ function renderSettings() {
           <div class="field">
             <label>Name</label>
             <input type="text" id="dealer-new-name" />
+          </div>
+          <div class="field">
+            <label>Alias (optional)</label>
+            <input type="text" id="dealer-new-alias" placeholder="Trading name, if different -- shown everywhere in the app instead" />
           </div>
           <div class="field">
             <label>Contact</label>
@@ -375,7 +379,7 @@ function renderSettings() {
         <div class="workflow-card" style="margin-top:12px">
           <div class="section-label" style="margin-top:0">Add from Lightspeed</div>
           <p class="hint-text" style="margin-top:0">Search your real Lightspeed catalog and add the exact item -- captures its real SKU and current cost/retail price automatically.</p>
-          <input type="text" id="part-ls-search-input" placeholder="Search Lightspeed items&hellip;" />
+          <input type="text" class="ls-search-input" id="part-ls-search-input" placeholder="Search Lightspeed items&hellip;" autocomplete="off" />
           <div class="ls-search-results" id="part-ls-search-results"></div>
         </div>
 
@@ -431,11 +435,13 @@ function renderSettings() {
 
   document.getElementById('dealer-add-btn').addEventListener('click', async () => {
     const name = document.getElementById('dealer-new-name').value.trim();
+    const alias = document.getElementById('dealer-new-alias').value.trim();
     const contact = document.getElementById('dealer-new-contact').value.trim();
     if (!name) { showToast('Enter a dealer name'); return; }
     try {
-      await api('/api/dealers', { method: 'POST', body: JSON.stringify({ name, contact }) });
+      await api('/api/dealers', { method: 'POST', body: JSON.stringify({ name, alias, contact }) });
       document.getElementById('dealer-new-name').value = '';
+      document.getElementById('dealer-new-alias').value = '';
       document.getElementById('dealer-new-contact').value = '';
       showToast('Dealer added');
       loadDealersSettings();
@@ -618,6 +624,7 @@ function renderDealersSettings(dealers) {
       return `
         <div class="quote-line-row" data-id="${d.id}">
           <input type="text" class="quote-line-desc dealer-edit-name" value="${esc(d.name)}" placeholder="Name" style="margin-bottom:6px" />
+          <input type="text" class="quote-line-desc dealer-edit-alias" value="${esc(d.alias)}" placeholder="Alias (optional -- the name shown everywhere in the app)" style="margin-bottom:6px" />
           <div class="quote-line-controls">
             <input type="text" class="dealer-edit-contact" value="${esc(d.contact)}" placeholder="Phone or email" />
             <button type="button" class="btn btn-secondary btn-small dealer-save-btn" data-id="${d.id}">Save</button>
@@ -630,7 +637,7 @@ function renderDealersSettings(dealers) {
               <button type="button" class="btn btn-ghost btn-small dealer-ls-unlink-btn" data-id="${d.id}">Unlink</button>
             </div>
           ` : `
-            <input type="text" class="dealer-ls-search-input" placeholder="Search Lightspeed customers…" />
+            <input type="text" class="ls-search-input dealer-ls-search-input" placeholder="Search Lightspeed customers…" autocomplete="off" />
             <div class="ls-search-results dealer-ls-search-results"></div>
           `}
         </div>
@@ -638,7 +645,10 @@ function renderDealersSettings(dealers) {
     }
     return `
       <div class="quote-line-row" data-id="${d.id}">
-        <div class="quote-line-desc" style="border:none;background:none;padding:0 0 4px;margin-bottom:0">${esc(d.name)}</div>
+        <div class="quote-line-desc" style="border:none;background:none;padding:0 0 4px;margin-bottom:0">
+          ${esc(d.alias || d.name)}
+          ${d.alias && d.alias !== d.name ? `<span class="hint-text" style="margin:0">(real name: ${esc(d.name)})</span>` : ''}
+        </div>
         ${d.lightspeed_customer_id ? `<div class="hint-text">🔗 Lightspeed: ${esc(d.lightspeed_customer_name)}</div>` : ''}
         <div class="quote-line-controls">
           <span>${d.contact ? esc(d.contact) : '&mdash;'}</span>
@@ -689,10 +699,11 @@ function renderDealersSettings(dealers) {
   el.querySelectorAll('.dealer-save-btn').forEach(btn => btn.addEventListener('click', async () => {
     const row = btn.closest('.quote-line-row');
     const name = row.querySelector('.dealer-edit-name').value.trim();
+    const alias = row.querySelector('.dealer-edit-alias').value.trim();
     const contact = row.querySelector('.dealer-edit-contact').value.trim();
     if (!name) { showToast('Enter a name'); return; }
     try {
-      await api(`/api/dealers/${btn.dataset.id}`, { method: 'PUT', body: JSON.stringify({ name, contact }) });
+      await api(`/api/dealers/${btn.dataset.id}`, { method: 'PUT', body: JSON.stringify({ name, alias, contact }) });
       dealersEditingId = null;
       showToast('Dealer updated');
       loadDealersSettings();
@@ -898,7 +909,7 @@ async function renderBoard() {
       }
       col.innerHTML = items.map(r => `
         <div class="board-card" data-id="${r.id}">
-          <div class="board-card-title">${esc(r.dealer_name) || '—'}</div>
+          <div class="board-card-title">${esc(r.dealer_alias || r.dealer_name) || '—'}</div>
           <div class="board-card-meta">${esc(r.brand)}${r.model ? ' ' + esc(r.model) : ''}</div>
           <div class="board-card-meta" style="font-family:var(--mono)">${esc(r.serial_number)}</div>
           ${quoteMiniBadge(r)}
@@ -1074,7 +1085,7 @@ async function loadRecords() {
       return `
         <div class="record-card" style="border-left-color:${meta.color}" data-id="${r.id}">
           <div class="record-card-top">
-            <span class="record-card-title">${esc(r.dealer_name) || '—'}</span>
+            <span class="record-card-title">${esc(r.dealer_alias || r.dealer_name) || '—'}</span>
             <span class="status-badge" style="background:${meta.color};color:#15171B">${meta.label}</span>
           </div>
           <div class="record-card-meta">
@@ -1107,7 +1118,7 @@ async function renderDetail(id) {
       <div class="screen">
         <div class="screen-header">
           <button class="icon-btn" id="back-btn">&#8592;</button>
-          <h2>${esc(r.dealer_name) || esc(r.serial_number)}</h2>
+          <h2>${esc(r.dealer_alias || r.dealer_name) || esc(r.serial_number)}</h2>
           <button class="icon-btn" id="edit-btn">Edit</button>
         </div>
         <div class="screen-body">
@@ -1118,7 +1129,7 @@ async function renderDetail(id) {
           <button type="button" class="collapsible-toggle" id="details-toggle"></button>
           <div id="details-content" style="${r.status === 'received' ? '' : 'display:none'}">
             <div class="section-label">${r.source_type === 'customer' ? 'Customer' : 'Dealer'}</div>
-            <div class="detail-row"><span class="k">Sent by</span><span class="v">${esc(r.dealer_name) || '—'}</span></div>
+            <div class="detail-row"><span class="k">Sent by</span><span class="v">${esc(r.dealer_alias || r.dealer_name) || '—'}${r.dealer_alias && r.dealer_alias !== r.dealer_name ? ` <span class="hint-text" style="margin:0">(${esc(r.dealer_name)})</span>` : ''}</span></div>
             <div class="detail-row"><span class="k">Contact</span><span class="v">${esc(r.dealer_contact) || '—'}</span></div>
             <div class="detail-row"><span class="k">Lightspeed</span><span class="v">${r.lightspeed_customer_id ? `🔗 ${esc(r.lightspeed_customer_name)}` : '<span class="hint-text" style="margin:0">Not linked</span>'}</span></div>
 
@@ -1676,7 +1687,7 @@ async function wireSentBySection(r) {
 
     selectEl.innerHTML = `
       <option value="">Select dealer&hellip;</option>
-      ${dealers.map(d => `<option value="${esc(d.name)}" ${match && match.id === d.id ? 'selected' : ''}>${esc(d.name)}</option>`).join('')}
+      ${dealers.map(d => `<option value="${esc(d.name)}" ${match && match.id === d.id ? 'selected' : ''}>${esc(d.alias || d.name)}</option>`).join('')}
       <option value="__new__" ${!match && r.source_type !== 'customer' && currentName ? 'selected' : ''}>+ Add new dealer&hellip;</option>
     `;
     selectEl.disabled = false;
@@ -1743,7 +1754,7 @@ async function wireSentBySection(r) {
       } catch (err) {
         lsResultsEl.innerHTML = `<div class="hint-text">Search failed: ${esc(err.message)}</div>`;
       }
-    }, 300);
+    }, 450);
   });
 
   updateSentByLayout();

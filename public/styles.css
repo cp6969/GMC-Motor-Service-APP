@@ -134,6 +134,19 @@ input:focus, textarea:focus, select:focus, button:focus-visible {
 }
 .field textarea { resize: vertical; min-height: 70px; }
 
+.ls-search-input {
+  width: 100%;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 13px 14px;
+  font-size: 16px;
+  margin-top: 4px;
+}
+.ls-search-input::placeholder { color: var(--text-dim); }
+.ls-search-input:focus { border-color: var(--accent); }
+
 .btn {
   display: inline-flex;
   align-items: center;

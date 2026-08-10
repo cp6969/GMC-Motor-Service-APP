@@ -110,6 +110,7 @@ addColumnIfMissing('service_images', 'category', "TEXT DEFAULT 'other'");
 addColumnIfMissing('dealers', 'share_token', 'TEXT');
 addColumnIfMissing('dealers', 'lightspeed_customer_id', 'TEXT');
 addColumnIfMissing('dealers', 'lightspeed_customer_name', 'TEXT');
+addColumnIfMissing('dealers', 'alias', 'TEXT');
 addColumnIfMissing('parts_catalog', 'lightspeed_item_id', 'TEXT');
 addColumnIfMissing('parts_catalog', 'lightspeed_synced_at', 'TEXT');
 addColumnIfMissing('service_records', 'lightspeed_customer_id', 'TEXT');
