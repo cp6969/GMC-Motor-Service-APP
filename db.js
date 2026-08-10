@@ -117,6 +117,7 @@ addColumnIfMissing('service_records', 'lightspeed_customer_name', 'TEXT');
 addColumnIfMissing('service_records', 'lightspeed_sale_id', 'TEXT');
 addColumnIfMissing('service_records', 'lightspeed_quote_id', 'TEXT');
 addColumnIfMissing('service_records', 'lightspeed_pushed_at', 'TEXT');
+addColumnIfMissing('service_records', 'lightspeed_sale_completed_at', 'TEXT');
 
 db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_share_token ON service_records(share_token)`);
 db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_dealer_share_token ON dealers(share_token)`);

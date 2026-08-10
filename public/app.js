@@ -81,10 +81,17 @@ function fmtMoney(v) {
 }
 
 function lightspeedPushPanelHtml(r) {
+  if (r.lightspeed_sale_completed_at && r.lightspeed_sale_id) {
+    return `
+      <div class="ls-linked-chip" style="margin-top:10px">
+        <span>✓ Sale completed in Lightspeed &mdash; Invoice IN${esc(r.lightspeed_sale_id)}</span>
+      </div>
+    `;
+  }
   if (r.lightspeed_quote_id) {
     return `
       <div class="ls-linked-chip" style="margin-top:10px">
-        <span>✓ Pushed to Lightspeed &mdash; Quote #${esc(r.lightspeed_quote_id)}</span>
+        <span>✓ Pushed to Lightspeed &mdash; Quote QN${esc(r.lightspeed_quote_id)}</span>
       </div>
     `;
   }
@@ -337,8 +344,16 @@ function renderSettings() {
         <div class="section-label">Dealers</div>
         <p class="hint-text">Shown as a pick-list on the "Sent by" section of a new service record. Add, rename, or remove dealers here any time.</p>
         <div id="dealers-list"><div class="empty-state"><div class="spinner"></div></div></div>
+
         <div class="workflow-card" style="margin-top:12px">
-          <div class="section-label" style="margin-top:0">Add a dealer</div>
+          <div class="section-label" style="margin-top:0">Add from Lightspeed</div>
+          <p class="hint-text" style="margin-top:0">Search your real Lightspeed customers -- picking one creates the dealer already linked, no separate Link step needed.</p>
+          <input type="text" id="dealer-ls-add-search-input" placeholder="Search Lightspeed customers&hellip;" />
+          <div class="ls-search-results" id="dealer-ls-add-search-results"></div>
+        </div>
+
+        <div class="workflow-card" style="margin-top:12px">
+          <div class="section-label" style="margin-top:0">Add a dealer manually</div>
           <div class="field">
             <label>Name</label>
             <input type="text" id="dealer-new-name" />
@@ -395,6 +410,25 @@ function renderSettings() {
   loadLightspeedStatus();
   loadLightspeedEmployeeSetting();
   loadDealersSettings();
+
+  wireLightspeedSearch(
+    document.getElementById('dealer-ls-add-search-input'),
+    document.getElementById('dealer-ls-add-search-results'),
+    async (customer) => {
+      try {
+        await api('/api/dealers', {
+          method: 'POST',
+          body: JSON.stringify({
+            name: customer.name, contact: customer.phone || customer.email,
+            lightspeed_customer_id: customer.id, lightspeed_customer_name: customer.name,
+          }),
+        });
+        showToast('Dealer added and linked');
+        loadDealersSettings();
+      } catch (err) { showToast(err.message); }
+    }
+  );
+
   document.getElementById('dealer-add-btn').addEventListener('click', async () => {
     const name = document.getElementById('dealer-new-name').value.trim();
     const contact = document.getElementById('dealer-new-contact').value.trim();
@@ -782,6 +816,16 @@ function stageBadge(status) {
 }
 
 function quoteMiniBadge(r) {
+  // Once pushed to Lightspeed, the real Lightspeed reference always wins over
+  // the plain quote-status badge -- QN while it's still an open quote, IN once
+  // the salesperson has actually completed the sale at checkout (same real
+  // Lightspeed Sale throughout, just relabeled once it's genuinely invoiced).
+  if (r.lightspeed_sale_completed_at && r.lightspeed_sale_id) {
+    return `<span class="mini-badge" style="background:#3FBF7F;color:#15171B">IN${esc(r.lightspeed_sale_id)}</span>`;
+  }
+  if (r.lightspeed_quote_id) {
+    return `<span class="mini-badge" style="background:#4FC3E8;color:#15171B">QN${esc(r.lightspeed_quote_id)}</span>`;
+  }
   if (!r.quote_status || r.quote_status === 'not_sent') return '';
   if (r.quote_status === 'skipped' && r.refurb_suggested) {
     return `<span class="mini-badge" style="background:${QUOTE_META.refurb.color};color:#15171B">Refurb suggested</span>`;
@@ -813,11 +857,40 @@ async function renderBoard() {
   document.getElementById('fab-new').addEventListener('click', () => renderForm(null));
   document.getElementById('fab-new-inline').addEventListener('click', () => renderForm(null));
 
+  // Returned motors older than this drop off the Board's own Returned column --
+  // they're done and dusted, no action needed, and the column would otherwise
+  // grow forever. History (a separate query, untouched by this) still shows
+  // every returned record regardless of age -- this is purely a Board-view
+  // decluttering rule, not a data retention one.
+  const RETURNED_BOARD_DAYS = 7;
+
+  // Plain calendar-day count, deliberately not a raw Date-object subtraction --
+  // date_returned is a bare "YYYY-MM-DD" string, which Date() parses as UTC
+  // midnight, while `new Date()` carries the current local time-of-day. Diffing
+  // those directly would shift the 7-day boundary by up to a day depending on
+  // what time it is and the shop's own timezone (Africa/Johannesburg). Building
+  // both sides from local Y/M/D components instead avoids that entirely.
+  function daysSince(dateStr) {
+    if (!dateStr) return null;
+    const [y, m, d] = dateStr.split('-').map(Number);
+    const returned = new Date(y, m - 1, d);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    return Math.round((today - returned) / 86400000);
+  }
+
   try {
     const records = await api('/api/records');
+
     STAGE_ORDER.forEach(s => {
       const col = document.getElementById(`col-${s}`);
-      const items = records.filter(r => r.status === s);
+      let items = records.filter(r => r.status === s);
+      if (s === 'returned') {
+        items = items.filter(r => {
+          const days = daysSince(r.date_returned);
+          return days === null || days < RETURNED_BOARD_DAYS;
+        });
+      }
       document.getElementById(`count-${s}`).textContent = items.length;
       if (!items.length) {
         col.innerHTML = `<div class="board-empty">No motors</div>`;
@@ -836,9 +909,21 @@ async function renderBoard() {
         if (card) wireBoardCardSwipe(card, r);
       });
     });
+    checkLightspeedInvoicesInBackground(renderBoard);
   } catch (err) {
     document.getElementById('board').innerHTML = `<div class="empty-state">Couldn't load board.<br/>${esc(err.message)}</div>`;
   }
+}
+
+// Fire-and-forget -- checks whether any pushed quote's real Lightspeed Sale
+// has since been completed (see the server route's own comment). Cheap when
+// there's nothing pending, so it's safe to call on every Board/History load
+// rather than needing its own refresh button. Silently does nothing on
+// failure -- this is a background nicety, not worth interrupting the page for.
+function checkLightspeedInvoicesInBackground(onChanged) {
+  api('/api/records/check-lightspeed-invoices', { method: 'POST' })
+    .then(result => { if (result.becameInvoice > 0) onChanged(); })
+    .catch(() => {});
 }
 
 // Drag/swipe a board card left or right to move it to the adjacent stage --
@@ -847,17 +932,20 @@ async function renderBoard() {
 // the record's detail view, same as before.
 function wireBoardCardSwipe(card, record) {
   const SWIPE_THRESHOLD = 70;
+  const TAP_THRESHOLD = 8; // pointer must stay within this in EVERY direction to count as a tap
   let dragging = false;
-  let moved = false;
+  let isHorizontalSwipe = false; // true once we've committed to treating this gesture as a swipe
   let startX = 0;
   let startY = 0;
   let dx = 0;
+  let dy = 0;
 
   card.addEventListener('pointerdown', (e) => {
     if (e.button !== undefined && e.button !== 0) return;
     dragging = true;
-    moved = false;
+    isHorizontalSwipe = false;
     dx = 0;
+    dy = 0;
     startX = e.clientX;
     startY = e.clientY;
     card.style.transition = 'none';
@@ -866,12 +954,21 @@ function wireBoardCardSwipe(card, record) {
 
   card.addEventListener('pointermove', (e) => {
     if (!dragging) return;
-    const curDx = e.clientX - startX;
-    const curDy = e.clientY - startY;
-    if (!moved && Math.abs(curDx) < 8 && Math.abs(curDy) < 8) return;
-    if (!moved && Math.abs(curDy) > Math.abs(curDx)) return; // vertical intent -- let it scroll
-    moved = true;
-    dx = curDx;
+    dx = e.clientX - startX;
+    dy = e.clientY - startY;
+    if (!isHorizontalSwipe) {
+      if (Math.abs(dx) < TAP_THRESHOLD && Math.abs(dy) < TAP_THRESHOLD) return;
+      if (Math.abs(dy) > Math.abs(dx)) {
+        // Vertical intent -- this is a scroll, not a swipe. Bail out of the
+        // gesture entirely (release capture) so the browser's own native
+        // scrolling takes over for the rest of it, and endDrag below won't
+        // mistake this for a tap just because it never became a swipe.
+        dragging = false;
+        try { card.releasePointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+        return;
+      }
+      isHorizontalSwipe = true;
+    }
     card.style.transform = `translateX(${dx}px)`;
     card.style.opacity = String(Math.max(1 - Math.abs(dx) / 300, 0.4));
   });
@@ -883,8 +980,13 @@ function wireBoardCardSwipe(card, record) {
     card.style.transform = '';
     card.style.opacity = '';
 
-    if (!moved) {
-      renderDetail(record.id);
+    if (!isHorizontalSwipe) {
+      // Only a genuine tap if the pointer barely moved at all -- NOT just
+      // "didn't clear the swipe threshold," which used to also match a
+      // vertical scroll and wrongly open the record instead of scrolling.
+      if (Math.abs(dx) < TAP_THRESHOLD && Math.abs(dy) < TAP_THRESHOLD) {
+        renderDetail(record.id);
+      }
       return;
     }
     if (Math.abs(dx) < SWIPE_THRESHOLD) return; // didn't clear the threshold, snaps back
@@ -988,6 +1090,7 @@ async function loadRecords() {
     listEl.querySelectorAll('.record-card').forEach(card => {
       card.addEventListener('click', () => renderDetail(card.dataset.id));
     });
+    checkLightspeedInvoicesInBackground(loadRecords);
   } catch (err) {
     listEl.innerHTML = `<div class="empty-state">Couldn't load records.<br/>${esc(err.message)}</div>`;
   }
@@ -1004,7 +1107,7 @@ async function renderDetail(id) {
       <div class="screen">
         <div class="screen-header">
           <button class="icon-btn" id="back-btn">&#8592;</button>
-          <h2>${esc(r.serial_number)}</h2>
+          <h2>${esc(r.dealer_name) || esc(r.serial_number)}</h2>
           <button class="icon-btn" id="edit-btn">Edit</button>
         </div>
         <div class="screen-body">
@@ -1012,19 +1115,22 @@ async function renderDetail(id) {
           <a class="btn btn-ghost btn-small" id="customer-link-anchor" href="${location.origin}/share/${r.share_token}" target="_blank" rel="noopener" style="margin-left:8px;text-decoration:none">🔗 Open customer link</a>
           <button class="btn btn-ghost btn-small" id="copy-link-btn" title="Copy link to clipboard">📋 Copy</button>
 
-          <div class="section-label">Motor</div>
-          <div class="detail-row"><span class="k">Serial number</span><span class="v" style="font-family:var(--mono)">${esc(r.serial_number)}</span></div>
-          <div class="detail-row"><span class="k">Brand / model</span><span class="v">${esc(r.brand) || '—'} ${esc(r.model) || ''}</span></div>
+          <button type="button" class="collapsible-toggle" id="details-toggle"></button>
+          <div id="details-content" style="${r.status === 'received' ? '' : 'display:none'}">
+            <div class="section-label">${r.source_type === 'customer' ? 'Customer' : 'Dealer'}</div>
+            <div class="detail-row"><span class="k">Sent by</span><span class="v">${esc(r.dealer_name) || '—'}</span></div>
+            <div class="detail-row"><span class="k">Contact</span><span class="v">${esc(r.dealer_contact) || '—'}</span></div>
+            <div class="detail-row"><span class="k">Lightspeed</span><span class="v">${r.lightspeed_customer_id ? `🔗 ${esc(r.lightspeed_customer_name)}` : '<span class="hint-text" style="margin:0">Not linked</span>'}</span></div>
 
-          <div class="section-label">${r.source_type === 'customer' ? 'Customer' : 'Dealer'}</div>
-          <div class="detail-row"><span class="k">Sent by</span><span class="v">${esc(r.dealer_name) || '—'}</span></div>
-          <div class="detail-row"><span class="k">Contact</span><span class="v">${esc(r.dealer_contact) || '—'}</span></div>
-          <div class="detail-row"><span class="k">Lightspeed</span><span class="v">${r.lightspeed_customer_id ? `🔗 ${esc(r.lightspeed_customer_name)}` : '<span class="hint-text" style="margin:0">Not linked</span>'}</span></div>
+            <div class="section-label">Motor</div>
+            <div class="detail-row"><span class="k">Serial number</span><span class="v" style="font-family:var(--mono)">${esc(r.serial_number)}</span></div>
+            <div class="detail-row"><span class="k">Brand / model</span><span class="v">${esc(r.brand) || '—'} ${esc(r.model) || ''}</span></div>
 
-          <div class="section-label">Timeline</div>
-          <div class="detail-row"><span class="k">Received</span><span class="v">${fmtDate(r.date_received)}</span></div>
-          <div class="detail-row"><span class="k">Completed</span><span class="v">${fmtDate(r.date_completed)}</span></div>
-          <div class="detail-row"><span class="k">Returned</span><span class="v">${fmtDate(r.date_returned)}</span></div>
+            <div class="section-label">Timeline</div>
+            <div class="detail-row"><span class="k">Received</span><span class="v">${fmtDate(r.date_received)}</span></div>
+            <div class="detail-row"><span class="k">Completed</span><span class="v">${fmtDate(r.date_completed)}</span></div>
+            <div class="detail-row"><span class="k">Returned</span><span class="v">${fmtDate(r.date_returned)}</span></div>
+          </div>
 
           ${r.issue_reported ? `<div class="section-label">Issue reported</div><div class="text-block">${esc(r.issue_reported)}</div>` : ''}
           ${r.damage_found ? `<div class="section-label">Damage found</div><div class="text-block">${esc(r.damage_found)}</div>` : ''}
@@ -1055,6 +1161,18 @@ async function renderDetail(id) {
 
     document.getElementById('back-btn').addEventListener('click', () => activeTab === 'history' ? renderList() : renderBoard());
     document.getElementById('edit-btn').addEventListener('click', () => renderForm(r));
+
+    const detailsToggle = document.getElementById('details-toggle');
+    const detailsContent = document.getElementById('details-content');
+    const setDetailsToggleLabel = () => {
+      const hidden = detailsContent.style.display === 'none';
+      detailsToggle.textContent = hidden ? '▸ Show customer, motor & timeline details' : '▾ Hide customer, motor & timeline details';
+    };
+    setDetailsToggleLabel();
+    detailsToggle.addEventListener('click', () => {
+      detailsContent.style.display = detailsContent.style.display === 'none' ? '' : 'none';
+      setDetailsToggleLabel();
+    });
     document.getElementById('copy-link-btn').addEventListener('click', async (e) => {
       e.preventDefault();
       const url = `${location.origin}/share/${r.share_token}`;
@@ -1091,6 +1209,9 @@ async function renderDetail(id) {
 
     renderPhotoSections(r);
     renderWorkflowPanel(r);
+    if (r.lightspeed_quote_id && !r.lightspeed_sale_completed_at) {
+      checkLightspeedInvoicesInBackground(() => renderDetail(id));
+    }
   } catch (err) {
     app.innerHTML = `<div class="screen"><div class="empty-state">Couldn't load record.<br/>${esc(err.message)}</div></div>`;
   }

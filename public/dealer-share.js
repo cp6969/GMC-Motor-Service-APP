@@ -43,7 +43,7 @@ function render(data) {
   app.innerHTML = `
     <div class="screen">
       <div class="topbar" style="position:static">
-        <div class="topbar-row" style="margin-bottom:0">
+        <div class="topbar-row" style="margin-bottom:0;justify-content:center">
           <img class="topbar-logo" src="/gmc-logo.png" alt="Greg Minnaar Cycles" />
         </div>
       </div>

@@ -502,7 +502,7 @@ app.get('/api/dealers', authMiddleware, (req, res) => {
 });
 
 app.post('/api/dealers', authMiddleware, (req, res) => {
-  const { name, contact } = req.body;
+  const { name, contact, lightspeed_customer_id, lightspeed_customer_name } = req.body;
   if (!name || !name.trim()) {
     return res.status(400).json({ error: 'Dealer name is required' });
   }
@@ -510,8 +510,15 @@ app.post('/api/dealers', authMiddleware, (req, res) => {
   if (existing) {
     return res.status(409).json({ error: 'A dealer with that name already exists' });
   }
-  const result = db.prepare('INSERT INTO dealers (name, contact, share_token) VALUES (?, ?, ?)').run(
-    name.trim(), (contact || '').trim() || null, crypto.randomBytes(12).toString('hex')
+  // Optional -- set when a dealer is created straight from a Lightspeed
+  // customer search (Settings > Dealers > "Add from Lightspeed") instead of
+  // typed manually, so it's already linked with no separate step needed.
+  const result = db.prepare(`
+    INSERT INTO dealers (name, contact, share_token, lightspeed_customer_id, lightspeed_customer_name)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(
+    name.trim(), (contact || '').trim() || null, crypto.randomBytes(12).toString('hex'),
+    lightspeed_customer_id ? String(lightspeed_customer_id) : null, lightspeed_customer_name || null
   );
   res.status(201).json(db.prepare('SELECT * FROM dealers WHERE id = ?').get(result.lastInsertRowid));
 });
@@ -1077,6 +1084,44 @@ app.post('/api/records/:id/push-to-lightspeed', authMiddleware, async (req, res)
     `).run(saleId, quoteId, req.params.id);
 
     res.json({ success: true, lightspeed_sale_id: saleId, lightspeed_quote_id: quoteId });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ error: err.message });
+  }
+});
+
+// Checked in the background after the Board/History screens render (see
+// app.js) -- for every pushed record whose Sale hasn't been confirmed
+// complete yet, checks Lightspeed directly. Once a salesperson finishes
+// checkout on the pushed Quote's Sale, it flips from "quote" (QN-prefixed)
+// to "invoice" (IN-prefixed) in the UI -- same real Lightspeed object
+// throughout, saleID unchanged, just relabeled once it's actually been paid.
+// Cheap to call repeatedly: a no-op (one SQL query, zero Lightspeed calls)
+// whenever nothing is still pending.
+app.post('/api/records/check-lightspeed-invoices', authMiddleware, async (req, res) => {
+  const pending = db.prepare(`
+    SELECT id, lightspeed_sale_id FROM service_records
+    WHERE lightspeed_sale_id IS NOT NULL AND lightspeed_sale_completed_at IS NULL
+  `).all();
+  if (!pending.length) return res.json({ checked: 0, becameInvoice: 0 });
+
+  try {
+    const { accessToken, accountId } = await getValidLightspeedToken();
+    const authHeaders = { Authorization: `Bearer ${accessToken}` };
+    let becameInvoice = 0;
+    await Promise.all(pending.map(async (record) => {
+      try {
+        const lsRes = await fetch(`${LIGHTSPEED_API_BASE}/Account/${accountId}/Sale/${record.lightspeed_sale_id}.json`, {
+          headers: authHeaders,
+        });
+        if (!lsRes.ok) return;
+        const data = await lsRes.json();
+        if (data.Sale && data.Sale.completed === 'true') {
+          db.prepare('UPDATE service_records SET lightspeed_sale_completed_at = CURRENT_TIMESTAMP WHERE id = ?').run(record.id);
+          becameInvoice++;
+        }
+      } catch (err) { /* skip this one, try again next time */ }
+    }));
+    res.json({ checked: pending.length, becameInvoice });
   } catch (err) {
     res.status(err.statusCode || 500).json({ error: err.message });
   }
