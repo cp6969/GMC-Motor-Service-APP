@@ -103,9 +103,6 @@ function lightspeedPushPanelHtml(r) {
       </div>
     `;
   }
-  if (r.status !== 'completed' && r.status !== 'returned') {
-    return `<p class="hint-text">Can be pushed to Lightspeed once the motor is marked Completed.</p>`;
-  }
   if (!r.lightspeed_customer_id) {
     return `<p class="hint-text">Link a Lightspeed customer above before this can be pushed.</p>`;
   }
@@ -321,111 +318,134 @@ function renderSettings() {
         <span style="width:24px"></span>
       </div>
       <div class="screen-body">
-        <div class="section-label">Workshop passcode</div>
-        <form id="passcode-form">
-          <div class="field">
-            <label>Current passcode</label>
-            <input type="password" id="s-current-passcode" autocomplete="current-password" required />
-          </div>
-          <div class="field">
-            <label>New passcode</label>
-            <input type="password" id="s-new-passcode" autocomplete="new-password" required minlength="4" />
-          </div>
-          <div class="field">
-            <label>Confirm new passcode</label>
-            <input type="password" id="s-confirm-passcode" autocomplete="new-password" required minlength="4" />
-          </div>
-          <button type="submit" class="btn btn-primary" id="passcode-save-btn">Update passcode</button>
-        </form>
-        <p class="hint-text">Everyone at the workshop shares this one passcode to log in — updating it here takes effect immediately for new logins. Devices already logged in stay logged in until they log out.</p>
-
-        <div class="section-label">Lightspeed</div>
-        <div id="lightspeed-status"><div class="empty-state"><div class="spinner"></div></div></div>
-        <div class="field" style="margin-top:10px">
-          <label>Employee for pushed quotes</label>
-          <select id="lightspeed-employee-select" disabled>
-            <option value="">Loading&hellip;</option>
-          </select>
-        </div>
-        <p class="hint-text">A pushed quote is created in Lightspeed under this employee, since there's no per-mechanic login here.</p>
-
-        <div class="section-label">Dealers</div>
-        <p class="hint-text">Shown as a pick-list on the "Sent by" section of a new service record. Add, rename, or remove dealers here any time.</p>
-        <div id="dealers-list"><div class="empty-state"><div class="spinner"></div></div></div>
-
-        <div class="workflow-card" style="margin-top:12px">
-          <div class="section-label" style="margin-top:0">Add from Lightspeed</div>
-          <p class="hint-text" style="margin-top:0">Search your real Lightspeed customers -- picking one creates the dealer already linked, no separate Link step needed.</p>
-          <input type="text" class="ls-search-input" id="dealer-ls-add-search-input" placeholder="Search Lightspeed customers&hellip;" autocomplete="off" />
-          <div class="ls-search-results" id="dealer-ls-add-search-results"></div>
+        <div class="chip-row" id="settings-tabs" style="margin-bottom:18px">
+          <button type="button" class="chip active" data-tab="general">General</button>
+          <button type="button" class="chip" data-tab="lightspeed">Lightspeed</button>
+          <button type="button" class="chip" data-tab="dealers">Dealers</button>
+          <button type="button" class="chip" data-tab="parts">Parts catalog</button>
         </div>
 
-        <div class="workflow-card" style="margin-top:12px">
-          <div class="section-label" style="margin-top:0">Add a dealer manually</div>
-          <div class="field">
-            <label>Name</label>
-            <input type="text" id="dealer-new-name" />
-          </div>
-          <div class="field">
-            <label>Alias (optional)</label>
-            <input type="text" id="dealer-new-alias" placeholder="Trading name, if different -- shown everywhere in the app instead" />
-          </div>
-          <div class="field">
-            <label>Contact</label>
-            <input type="text" id="dealer-new-contact" placeholder="Phone or email (optional)" />
-          </div>
-          <button class="btn btn-secondary" id="dealer-add-btn">Add dealer</button>
-        </div>
-
-        <div class="section-label">Parts catalog</div>
-        <p class="hint-text">This is the exact list a mechanic can pick from when building a quote -- they never see a live Lightspeed search, only what's added here. Add real parts below, or verify existing ones still match a real Lightspeed item.</p>
-        <div style="display:flex;justify-content:flex-end;margin-bottom:6px">
-          <button class="btn btn-ghost btn-small" id="parts-verify-all-btn">Verify all</button>
-        </div>
-        <div id="parts-catalog-list"><div class="empty-state"><div class="spinner"></div></div></div>
-
-        <div class="workflow-card" style="margin-top:12px">
-          <div class="section-label" style="margin-top:0">Add from Lightspeed</div>
-          <p class="hint-text" style="margin-top:0">Search your real Lightspeed catalog and add the exact item -- captures its real SKU and current cost/retail price automatically.</p>
-          <input type="text" class="ls-search-input" id="part-ls-search-input" placeholder="Search Lightspeed items&hellip;" autocomplete="off" />
-          <div class="ls-search-results" id="part-ls-search-results"></div>
-        </div>
-
-        <div class="workflow-card" style="margin-top:12px">
-          <div class="section-label" style="margin-top:0">Add a part manually</div>
-          <p class="hint-text" style="margin-top:0">For a one-off code with no real Lightspeed item (e.g. a labour charge) -- won't show as Lightspeed-verified until linked.</p>
-          <div class="field">
-            <label>SKU</label>
-            <input type="text" id="part-new-sku" style="font-family:var(--mono);text-transform:uppercase" />
-          </div>
-          <div class="field">
-            <label>Description</label>
-            <input type="text" id="part-new-desc" />
-          </div>
-          <div class="form-row-2">
+        <div class="settings-panel" data-panel="general">
+          <div class="section-label" style="margin-top:0">Workshop passcode</div>
+          <form id="passcode-form">
             <div class="field">
-              <label>Cost (ZAR)</label>
-              <input type="number" step="0.01" id="part-new-cost" />
+              <label>Current passcode</label>
+              <input type="password" id="s-current-passcode" autocomplete="current-password" required />
             </div>
             <div class="field">
-              <label>Retail price (ZAR)</label>
-              <input type="number" step="0.01" id="part-new-retail" />
+              <label>New passcode</label>
+              <input type="password" id="s-new-passcode" autocomplete="new-password" required minlength="4" />
             </div>
-          </div>
-          <div class="field">
-            <label>Category</label>
-            <select id="part-new-category">
-              ${Object.entries(PART_CATEGORIES).map(([val, label]) => `<option value="${val}">${label}</option>`).join('')}
+            <div class="field">
+              <label>Confirm new passcode</label>
+              <input type="password" id="s-confirm-passcode" autocomplete="new-password" required minlength="4" />
+            </div>
+            <button type="submit" class="btn btn-primary" id="passcode-save-btn">Update passcode</button>
+          </form>
+          <p class="hint-text">Everyone at the workshop shares this one passcode to log in — updating it here takes effect immediately for new logins. Devices already logged in stay logged in until they log out.</p>
+        </div>
+
+        <div class="settings-panel" data-panel="lightspeed" style="display:none">
+          <div id="lightspeed-status"><div class="empty-state"><div class="spinner"></div></div></div>
+          <div class="field" style="margin-top:10px">
+            <label>Employee for pushed quotes</label>
+            <select id="lightspeed-employee-select" disabled>
+              <option value="">Loading&hellip;</option>
             </select>
           </div>
-          <p class="hint-text" style="margin-top:0">Dealers get an automatic ${DEALER_PARTS_DISCOUNT * 100}% discount on Parts -- never on Labour or Postage.</p>
-          <button class="btn btn-secondary" id="part-add-btn">Add part</button>
+          <p class="hint-text">A pushed quote is created in Lightspeed under this employee, since there's no per-mechanic login here.</p>
+        </div>
+
+        <div class="settings-panel" data-panel="dealers" style="display:none">
+          <p class="hint-text" style="margin-top:0">Shown as a pick-list on the "Sent by" section of a new service record. Add, rename, or remove dealers here any time.</p>
+          <div id="dealers-list"><div class="empty-state"><div class="spinner"></div></div></div>
+
+          <div class="workflow-card" style="margin-top:12px">
+            <div class="section-label" style="margin-top:0">Add from Lightspeed</div>
+            <p class="hint-text" style="margin-top:0">Search your real Lightspeed customers -- picking one creates the dealer already linked, no separate Link step needed.</p>
+            <input type="text" class="ls-search-input" id="dealer-ls-add-search-input" placeholder="Search Lightspeed customers&hellip;" autocomplete="off" />
+            <div class="ls-search-results" id="dealer-ls-add-search-results"></div>
+          </div>
+
+          <div class="workflow-card" style="margin-top:12px">
+            <div class="section-label" style="margin-top:0">Add a dealer manually</div>
+            <div class="field">
+              <label>Name</label>
+              <input type="text" id="dealer-new-name" />
+            </div>
+            <div class="field">
+              <label>Alias (optional)</label>
+              <input type="text" id="dealer-new-alias" placeholder="Trading name, if different -- shown everywhere in the app instead" />
+            </div>
+            <div class="field">
+              <label>Contact</label>
+              <input type="text" id="dealer-new-contact" placeholder="Phone or email (optional)" />
+            </div>
+            <button class="btn btn-secondary" id="dealer-add-btn">Add dealer</button>
+          </div>
+        </div>
+
+        <div class="settings-panel" data-panel="parts" style="display:none">
+          <p class="hint-text" style="margin-top:0">This is the exact list a mechanic can pick from when building a quote -- they never see a live Lightspeed search, only what's added here. Add real parts below, or verify existing ones still match a real Lightspeed item.</p>
+          <div style="display:flex;justify-content:flex-end;margin-bottom:6px">
+            <button class="btn btn-ghost btn-small" id="parts-verify-all-btn">Verify all</button>
+          </div>
+          <div id="parts-catalog-list"><div class="empty-state"><div class="spinner"></div></div></div>
+
+          <div class="workflow-card" style="margin-top:12px">
+            <div class="section-label" style="margin-top:0">Add from Lightspeed</div>
+            <p class="hint-text" style="margin-top:0">Search your real Lightspeed catalog and add the exact item -- captures its real SKU and current cost/retail price automatically.</p>
+            <input type="text" class="ls-search-input" id="part-ls-search-input" placeholder="Search Lightspeed items&hellip;" autocomplete="off" />
+            <div class="ls-search-results" id="part-ls-search-results"></div>
+          </div>
+
+          <div class="workflow-card" style="margin-top:12px">
+            <div class="section-label" style="margin-top:0">Add a part manually</div>
+            <p class="hint-text" style="margin-top:0">For a one-off code with no real Lightspeed item (e.g. a labour charge) -- won't show as Lightspeed-verified until linked.</p>
+            <div class="field">
+              <label>SKU</label>
+              <input type="text" id="part-new-sku" style="font-family:var(--mono);text-transform:uppercase" />
+            </div>
+            <div class="field">
+              <label>Description</label>
+              <input type="text" id="part-new-desc" />
+            </div>
+            <div class="form-row-2">
+              <div class="field">
+                <label>Cost (ZAR)</label>
+                <input type="number" step="0.01" id="part-new-cost" />
+              </div>
+              <div class="field">
+                <label>Retail price (ZAR)</label>
+                <input type="number" step="0.01" id="part-new-retail" />
+              </div>
+            </div>
+            <div class="field">
+              <label>Category</label>
+              <select id="part-new-category">
+                ${Object.entries(PART_CATEGORIES).map(([val, label]) => `<option value="${val}">${label}</option>`).join('')}
+              </select>
+            </div>
+            <p class="hint-text" style="margin-top:0">Dealers get an automatic ${DEALER_PARTS_DISCOUNT * 100}% discount on Parts -- never on Labour or Postage.</p>
+            <button class="btn btn-secondary" id="part-add-btn">Add part</button>
+          </div>
         </div>
       </div>
     </div>
   `;
 
   document.getElementById('settings-back-btn').addEventListener('click', () => activeTab === 'history' ? renderList() : renderBoard());
+
+  document.querySelectorAll('#settings-tabs .chip').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#settings-tabs .chip').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      document.querySelectorAll('.settings-panel').forEach(panel => {
+        panel.style.display = panel.dataset.panel === btn.dataset.tab ? '' : 'none';
+      });
+    });
+  });
+
   loadLightspeedStatus();
   loadLightspeedEmployeeSetting();
   loadDealersSettings();
@@ -1215,7 +1235,7 @@ async function renderDetail(id) {
     const pushBtn = document.getElementById('push-to-lightspeed-btn');
     if (pushBtn) {
       pushBtn.addEventListener('click', async () => {
-        if (!confirm(`Push this quote to Lightspeed for ${r.lightspeed_customer_name}? This creates a real Quote a salesperson can complete at checkout.`)) return;
+        if (!confirm(`Push this quote to Lightspeed for ${r.lightspeed_customer_name}? This creates a real Quote you can then email to the client from Lightspeed.`)) return;
         pushBtn.disabled = true;
         pushBtn.textContent = 'Pushing…';
         try {
@@ -2053,7 +2073,27 @@ function renderForm(record) {
     });
   }
 
-  document.getElementById('save-btn').addEventListener('click', async () => {
+  let saving = false;
+  const saveBtn = document.getElementById('save-btn');
+  saveBtn.addEventListener('click', async () => {
+    // Guards against a double-tap on a touchscreen firing this twice before
+    // the first request even returns -- each POST creates a brand-new
+    // record, so without this a fast double-click on "Save record" silently
+    // creates two identical records. Reset only on failure/early-return;
+    // on success we navigate away to renderDetail(), which discards this
+    // whole form (and this button) anyway.
+    if (saving) return;
+    saving = true;
+    saveBtn.disabled = true;
+    try {
+      await doSave();
+    } finally {
+      saving = false;
+      saveBtn.disabled = false;
+    }
+  });
+
+  async function doSave() {
     const sourceTypeEl = document.querySelector('input[name="f-source-type"]:checked');
     const sourceType = sourceTypeEl ? sourceTypeEl.value : 'dealer';
     const dealerSelectEl = document.getElementById('f-dealer-select');
@@ -2125,7 +2165,7 @@ function renderForm(record) {
     } catch (err) {
       showToast(err.message);
     }
-  });
+  }
 }
 
 function renderPendingPhotoGrid() {
