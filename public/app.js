@@ -83,6 +83,15 @@ function fmtDate(d) {
   return d;
 }
 
+function fmtDateTime(d) {
+  if (!d) return '—';
+  // SQLite CURRENT_TIMESTAMP is "YYYY-MM-DD HH:MM:SS" in UTC with no
+  // timezone marker -- append one so the browser doesn't misread it as local.
+  const parsed = new Date(d.replace(' ', 'T') + 'Z');
+  if (isNaN(parsed)) return d;
+  return parsed.toLocaleString();
+}
+
 function fmtMoney(v) {
   if (v === null || v === undefined || v === '') return '—';
   return 'R' + Number(v).toFixed(2);
@@ -1647,9 +1656,29 @@ function renderWorkflowPanel(r) {
           ? `Reconditioned replacement motor issued (serial ${esc(r.refurb_serial)}). Once it's physically sent back, mark it returned.`
           : "Repair complete. Once it's physically sent back, mark it returned."
         }</p>
-        <button class="btn btn-primary" id="wf-mark-returned">Mark returned &rarr;</button>
+        <div style="display:flex;align-items:flex-start;gap:10px">
+          ${r.test_ridden_at ? `
+            <div>
+              <button class="btn btn-info" disabled>Test Ridden</button>
+              <div class="hint-text" style="margin-top:4px">${esc(fmtDateTime(r.test_ridden_at))}</div>
+            </div>
+          ` : `
+            <button class="btn btn-info" id="wf-mark-tested">Tested?</button>
+          `}
+          <button class="btn btn-primary" id="wf-mark-returned">Mark returned &rarr;</button>
+        </div>
       </div>
     `;
+    const testedBtn = document.getElementById('wf-mark-tested');
+    if (testedBtn) {
+      testedBtn.addEventListener('click', async () => {
+        try {
+          const updated = await api(`/api/records/${r.id}/test-ridden`, { method: 'POST' });
+          currentRecord = updated;
+          renderWorkflowPanel(updated);
+        } catch (err) { showToast(err.message); }
+      });
+    }
     document.getElementById('wf-mark-returned').addEventListener('click', () => setStage(r.id, 'returned'));
 
   } else if (r.status === 'returned') {

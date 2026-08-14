@@ -164,6 +164,9 @@ input:focus, textarea:focus, select:focus, button:focus-visible {
 .btn-primary:active { background: #c7e62e; }
 .btn-secondary { background: var(--panel-raised); color: var(--text); border: 1px solid var(--border); }
 .btn-danger { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
+.btn-info { background: #5B8DEF; color: #fff; }
+.btn-info:active { background: #4a78d6; }
+.btn-info:disabled { opacity: 0.85; cursor: default; }
 .btn-block { width: 100%; }
 
 .error-text {

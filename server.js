@@ -431,6 +431,17 @@ app.put('/api/records/:id/stage', authMiddleware, (req, res) => {
   res.json(db.prepare('SELECT * FROM service_records WHERE id = ?').get(req.params.id));
 });
 
+// Marks the motor as test ridden before it goes back -- a one-way timestamp
+// (like date_completed/date_returned) rather than a freeform field, since
+// what matters is simply that it happened and when.
+app.post('/api/records/:id/test-ridden', authMiddleware, (req, res) => {
+  const record = db.prepare('SELECT * FROM service_records WHERE id = ?').get(req.params.id);
+  if (!record) return res.status(404).json({ error: 'Record not found' });
+
+  db.prepare('UPDATE service_records SET test_ridden_at = CURRENT_TIMESTAMP WHERE id = ?').run(req.params.id);
+  res.json(db.prepare('SELECT * FROM service_records WHERE id = ?').get(req.params.id));
+});
+
 app.post('/api/records/:id/quote', authMiddleware, (req, res) => {
   const record = db.prepare('SELECT * FROM service_records WHERE id = ?').get(req.params.id);
   if (!record) return res.status(404).json({ error: 'Record not found' });
