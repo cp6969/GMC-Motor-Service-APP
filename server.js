@@ -483,6 +483,63 @@ app.post('/api/records/:id/quote', authMiddleware, (req, res) => {
   res.json(db.prepare('SELECT * FROM service_records WHERE id = ?').get(req.params.id));
 });
 
+// Edits an already-sent quote's line items in place -- unlike the POST
+// version above (the original "send this quote for a decision" action, which
+// resets quote_status to pending and can advance the record's stage), this
+// never touches quote_status/quote_sent_at/status. It only exists for
+// correcting an already-approved/declined/pending quote's contents. Marks
+// quote_edited_at whenever a Lightspeed quote already exists, so the
+// Lightspeed panel knows to offer "Update Lightspeed" instead of showing it
+// as already in sync -- see POST .../update-lightspeed below.
+app.put('/api/records/:id/quote', authMiddleware, (req, res) => {
+  const record = db.prepare('SELECT * FROM service_records WHERE id = ?').get(req.params.id);
+  if (!record) return res.status(404).json({ error: 'Record not found' });
+  if (!record.quote_status || record.quote_status === 'not_sent' || record.quote_status === 'skipped') {
+    return res.status(400).json({ error: 'This record has no quote to edit yet' });
+  }
+
+  const { line_items, quote_notes } = req.body;
+  if (!Array.isArray(line_items) || !line_items.length) {
+    return res.status(400).json({ error: 'At least one line item is required' });
+  }
+  const items = line_items.map(li => ({
+    sku: (li.sku || '').toString().slice(0, 100),
+    description: (li.description || '').toString().slice(0, 300),
+    unit_price: Number(li.unit_price),
+    quantity: Number(li.quantity) || 1,
+    category: PART_CATEGORIES.includes(li.category) ? li.category : 'part',
+    original_unit_price: li.original_unit_price === undefined || li.original_unit_price === null || li.original_unit_price === ''
+      ? null : Number(li.original_unit_price),
+    // Carried through from the client so an unchanged line keeps its real
+    // Lightspeed SaleLine link -- only a genuinely new/edited line arrives
+    // with this blank, which /update-lightspeed treats as "needs (re)creating".
+    lightspeed_sale_line_id: li.lightspeed_sale_line_id || null,
+  }));
+  if (items.some(li => !li.description || isNaN(li.unit_price) || li.unit_price < 0 || li.quantity <= 0)) {
+    return res.status(400).json({ error: 'Each line item needs a description, a valid unit price, and a positive quantity' });
+  }
+  const finalAmount = Math.round(items.reduce((sum, li) => sum + li.unit_price * li.quantity, 0) * 100) / 100;
+
+  db.prepare('DELETE FROM quote_line_items WHERE record_id = ?').run(req.params.id);
+  const insertLine = db.prepare(`
+    INSERT INTO quote_line_items (record_id, sku, description, unit_price, quantity, category, original_unit_price, lightspeed_sale_line_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  items.forEach(li => insertLine.run(
+    req.params.id, li.sku || null, li.description, li.unit_price, li.quantity, li.category, li.original_unit_price, li.lightspeed_sale_line_id
+  ));
+
+  db.prepare(`
+    UPDATE service_records SET
+      quote_amount = ?, quote_notes = ?,
+      quote_edited_at = CASE WHEN lightspeed_quote_id IS NOT NULL THEN CURRENT_TIMESTAMP ELSE quote_edited_at END,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(finalAmount, quote_notes || null, req.params.id);
+
+  res.json(db.prepare('SELECT * FROM service_records WHERE id = ?').get(req.params.id));
+});
+
 app.post('/api/records/:id/quote/respond', authMiddleware, (req, res) => {
   const record = db.prepare('SELECT * FROM service_records WHERE id = ?').get(req.params.id);
   if (!record) return res.status(404).json({ error: 'Record not found' });
@@ -1054,6 +1111,29 @@ app.post('/api/settings/lightspeed-employee', authMiddleware, (req, res) => {
   res.json({ id, name });
 });
 
+// Resolves local quote_line_items rows against the owner-curated parts
+// catalog into the shape Lightspeed's SaleLine wants -- shared by the initial
+// push (below) and the update-existing-quote route further down. A bare
+// custom line (no SKU) or a SKU that's missing/unverified in the catalog is
+// collected as a problem rather than silently guessed at, so the whole
+// push/update can be blocked with a clear, specific reason.
+function resolveLinesForLightspeed(lineItems) {
+  const problems = [];
+  const resolved = lineItems.map(li => {
+    if (!li.sku) {
+      problems.push(`"${li.description}" has no SKU (added as a custom line)`);
+      return null;
+    }
+    const part = db.prepare('SELECT * FROM parts_catalog WHERE sku = ?').get(li.sku);
+    if (!part || !part.lightspeed_item_id) {
+      problems.push(`"${li.description}" (${li.sku}) isn't a verified Lightspeed item -- verify it in Settings first`);
+      return null;
+    }
+    return { itemID: part.lightspeed_item_id, unitQuantity: String(li.quantity), unitPrice: String(li.unit_price) };
+  });
+  return { resolved, problems };
+}
+
 // The actual push -- creates a real, incomplete Lightspeed Sale for the
 // record's linked customer, attaches every quote line item as a real
 // SaleLine (resolved to a verified parts_catalog entry, never a bare SKU
@@ -1082,23 +1162,7 @@ app.post('/api/records/:id/push-to-lightspeed', authMiddleware, async (req, res)
     return res.status(400).json({ error: 'Set a Lightspeed employee in Settings before pushing quotes' });
   }
 
-  // Resolve every line against the owner-curated parts catalog -- a bare
-  // custom line (no SKU) or a SKU that's missing/unverified in the catalog
-  // blocks the whole push, named explicitly, rather than silently guessing
-  // or pushing a partial quote.
-  const problems = [];
-  const resolvedLines = lineItems.map(li => {
-    if (!li.sku) {
-      problems.push(`"${li.description}" has no SKU (added as a custom line)`);
-      return null;
-    }
-    const part = db.prepare('SELECT * FROM parts_catalog WHERE sku = ?').get(li.sku);
-    if (!part || !part.lightspeed_item_id) {
-      problems.push(`"${li.description}" (${li.sku}) isn't a verified Lightspeed item -- verify it in Settings first`);
-      return null;
-    }
-    return { itemID: part.lightspeed_item_id, unitQuantity: String(li.quantity), unitPrice: String(li.unit_price) };
-  });
+  const { resolved: resolvedLines, problems } = resolveLinesForLightspeed(lineItems);
   if (problems.length) {
     return res.status(400).json({ error: 'Cannot push -- fix these lines first', problems });
   }
@@ -1136,6 +1200,19 @@ app.post('/api/records/:id/push-to-lightspeed', authMiddleware, async (req, res)
       body: JSON.stringify({ SaleLines: { SaleLine: resolvedLines } }),
     });
     if (!linesRes.ok) throw new Error(`Couldn't add line items: ${linesRes.status} ${await linesRes.text()}`);
+    // Confirmed live (2026-08-11): this PUT's own response already includes
+    // the newly-created SaleLine array, each with its real saleLineID, in the
+    // same order as the request -- no follow-up GET needed. Recorded per
+    // local line so a later edit (see /update-lightspeed) can reconcile
+    // against Lightspeed's real line IDs instead of guessing.
+    const linesData = await linesRes.json();
+    const newLinesRaw = linesData.Sale && linesData.Sale.SaleLines && linesData.Sale.SaleLines.SaleLine
+      ? (Array.isArray(linesData.Sale.SaleLines.SaleLine) ? linesData.Sale.SaleLines.SaleLine : [linesData.Sale.SaleLines.SaleLine])
+      : [];
+    const recordSaleLineId = db.prepare('UPDATE quote_line_items SET lightspeed_sale_line_id = ? WHERE id = ?');
+    lineItems.forEach((li, i) => {
+      if (newLinesRaw[i]) recordSaleLineId.run(newLinesRaw[i].saleLineID, li.id);
+    });
 
     const quoteRes = await fetchLightspeed(acct('Quote.json'), {
       method: 'POST', headers: authHeaders,
@@ -1151,6 +1228,79 @@ app.post('/api/records/:id/push-to-lightspeed', authMiddleware, async (req, res)
     `).run(saleId, quoteId, req.params.id);
 
     res.json({ success: true, lightspeed_sale_id: saleId, lightspeed_quote_id: quoteId });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ error: err.message });
+  }
+});
+
+// Re-syncs an already-pushed quote's line items to Lightspeed after a local
+// edit (see PUT /api/records/:id/quote above). Reconciles against the SAME
+// existing Sale/Quote rather than creating a new one -- confirmed live
+// (2026-08-11, using a throwaway Sale, archived afterward) that
+// DELETE SaleLine/{id}.json genuinely removes a line (not a local no-op),
+// and that PUT Sale/{id}.json {SaleLines:{SaleLine:[...]}} still works
+// afterward to add a fresh batch, with the response's own SaleLine array
+// coming back in the same order as the request. Deleting every existing line
+// and re-adding the current full set is simpler and safer than trying to
+// diff/patch individual lines in place, and this Sale's line count is always
+// small (a handful of items on a motor service quote).
+app.post('/api/records/:id/update-lightspeed', authMiddleware, async (req, res) => {
+  const record = db.prepare('SELECT * FROM service_records WHERE id = ?').get(req.params.id);
+  if (!record) return res.status(404).json({ error: 'Record not found' });
+  if (!record.lightspeed_sale_id || !record.lightspeed_quote_id) {
+    return res.status(400).json({ error: "This quote hasn't been pushed to Lightspeed yet" });
+  }
+  if (record.lightspeed_sale_completed_at) {
+    return res.status(400).json({ error: "This quote's sale has already been completed in Lightspeed -- it can no longer be edited from here" });
+  }
+  const lineItems = db.prepare('SELECT * FROM quote_line_items WHERE record_id = ? ORDER BY id ASC').all(req.params.id);
+  if (!lineItems.length) {
+    return res.status(400).json({ error: 'No quote line items to push' });
+  }
+
+  const { resolved, problems } = resolveLinesForLightspeed(lineItems);
+  if (problems.length) {
+    return res.status(400).json({ error: 'Cannot update -- fix these lines first', problems });
+  }
+
+  try {
+    const { accessToken, accountId } = await getValidLightspeedToken();
+    const authHeaders = { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' };
+    const acct = (path) => `${LIGHTSPEED_API_BASE}/Account/${accountId}/${path}`;
+    const saleId = record.lightspeed_sale_id;
+
+    const currentRes = await fetchLightspeed(acct(`Sale/${saleId}.json?load_relations=["SaleLines"]`), { headers: authHeaders });
+    if (!currentRes.ok) throw new Error(`Couldn't read the existing Lightspeed sale: ${currentRes.status} ${await currentRes.text()}`);
+    const currentData = await currentRes.json();
+    const currentLinesRaw = currentData.Sale && currentData.Sale.SaleLines && currentData.Sale.SaleLines.SaleLine
+      ? (Array.isArray(currentData.Sale.SaleLines.SaleLine) ? currentData.Sale.SaleLines.SaleLine : [currentData.Sale.SaleLines.SaleLine])
+      : [];
+
+    for (const line of currentLinesRaw) {
+      const delRes = await fetchLightspeed(acct(`SaleLine/${line.saleLineID}.json`), { method: 'DELETE', headers: authHeaders });
+      if (!delRes.ok) throw new Error(`Couldn't remove an old line item: ${delRes.status} ${await delRes.text()}`);
+    }
+
+    const addRes = await fetchLightspeed(acct(`Sale/${saleId}.json`), {
+      method: 'PUT', headers: authHeaders,
+      body: JSON.stringify({ SaleLines: { SaleLine: resolved } }),
+    });
+    if (!addRes.ok) throw new Error(`Couldn't add the updated line items: ${addRes.status} ${await addRes.text()}`);
+    const addData = await addRes.json();
+    const newLinesRaw = addData.Sale && addData.Sale.SaleLines && addData.Sale.SaleLines.SaleLine
+      ? (Array.isArray(addData.Sale.SaleLines.SaleLine) ? addData.Sale.SaleLines.SaleLine : [addData.Sale.SaleLines.SaleLine])
+      : [];
+
+    const recordSaleLineId = db.prepare('UPDATE quote_line_items SET lightspeed_sale_line_id = ? WHERE id = ?');
+    lineItems.forEach((li, i) => {
+      if (newLinesRaw[i]) recordSaleLineId.run(newLinesRaw[i].saleLineID, li.id);
+    });
+
+    db.prepare(`
+      UPDATE service_records SET lightspeed_pushed_at = CURRENT_TIMESTAMP, quote_edited_at = NULL WHERE id = ?
+    `).run(req.params.id);
+
+    res.json({ success: true, lightspeed_sale_id: saleId, lightspeed_quote_id: record.lightspeed_quote_id });
   } catch (err) {
     res.status(err.statusCode || 500).json({ error: err.message });
   }

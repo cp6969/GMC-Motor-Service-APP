@@ -767,6 +767,7 @@ a.record-card {
 .quote-line-desc {
   width: 100%;
   background: var(--panel);
+  color: var(--text);
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 6px 8px;
@@ -779,6 +780,7 @@ a.record-card {
   gap: 6px;
   font-size: 13px;
   color: var(--text-dim);
+  flex-wrap: wrap;
 }
 .quote-line-sku {
   font-family: var(--mono);
@@ -790,17 +792,28 @@ a.record-card {
   white-space: nowrap;
   max-width: 70px;
 }
+.quote-line-category {
+  flex: none;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 6px;
+  font-size: 12px;
+  max-width: 92px;
+}
 .quote-line-qty, .quote-line-price {
   width: 56px;
   flex: none;
   background: var(--panel);
+  color: var(--text);
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 4px;
   font-size: 13px;
 }
 .quote-line-total {
-  flex: 1;
+  flex: 1 0 100%;
   text-align: right;
   font-weight: 600;
   color: var(--text);

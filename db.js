@@ -122,6 +122,13 @@ addColumnIfMissing('service_records', 'lightspeed_sale_completed_at', 'TEXT');
 addColumnIfMissing('parts_catalog', 'category', "TEXT NOT NULL DEFAULT 'part'");
 addColumnIfMissing('quote_line_items', 'category', "TEXT DEFAULT 'part'");
 addColumnIfMissing('quote_line_items', 'original_unit_price', 'NUMERIC');
+addColumnIfMissing('quote_line_items', 'lightspeed_sale_line_id', 'TEXT');
+// Set the moment an already-pushed quote's line items are edited (see the PUT
+// /api/records/:id/quote route) -- cleared back to NULL the moment those
+// changes are successfully re-synced to Lightspeed (POST .../update-lightspeed).
+// Non-null is what flips the Lightspeed panel from a static "already pushed"
+// chip to an actionable "Update Lightspeed" button.
+addColumnIfMissing('service_records', 'quote_edited_at', 'TEXT');
 
 // One-time backfill: the two known labour SKUs already in the catalog
 // (added before "category" existed) are real service charges, not spares --

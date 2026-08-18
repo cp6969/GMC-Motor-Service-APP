@@ -96,6 +96,9 @@ function lightspeedPushPanelHtml(r) {
       </div>
     `;
   }
+  if (r.lightspeed_quote_id && r.quote_edited_at) {
+    return `<button class="btn btn-small" id="update-lightspeed-btn" style="margin-top:10px;background:#2E7CD6;color:#fff;border:none">Update Lightspeed</button>`;
+  }
   if (r.lightspeed_quote_id) {
     return `
       <div class="ls-linked-chip" style="margin-top:10px">
@@ -1193,10 +1196,15 @@ async function renderDetail(id) {
           ` : ''}
 
           ${r.quote_status && r.quote_status !== 'not_sent' && r.quote_status !== 'skipped' ? `
-          <div class="section-label">Quote</div>
-          ${quoteLineItemsReadOnlyHtml(r.line_items)}
-          <div class="detail-row"><span class="k">Total</span><span class="v" style="font-weight:700">${fmtMoney(r.quote_amount)}</span></div>
-          ${r.quote_notes ? `<div class="text-block">${esc(r.quote_notes)}</div>` : ''}
+          <div class="section-label" style="display:flex;align-items:center;gap:6px">
+            <span>Quote</span>
+            ${!r.lightspeed_sale_completed_at ? `<button type="button" class="icon-btn" id="edit-quote-btn" title="Edit quote" style="padding:0;font-size:15px">&#9998;</button>` : ''}
+          </div>
+          <div id="quote-content">
+            ${quoteLineItemsReadOnlyHtml(r.line_items)}
+            <div class="detail-row"><span class="k">Total</span><span class="v" style="font-weight:700">${fmtMoney(r.quote_amount)}</span></div>
+            ${r.quote_notes ? `<div class="text-block">${esc(r.quote_notes)}</div>` : ''}
+          </div>
           <div id="lightspeed-push-panel">${lightspeedPushPanelHtml(r)}</div>
           ` : ''}
 
@@ -1259,6 +1267,38 @@ async function renderDetail(id) {
       });
     }
 
+    const updateLsBtn = document.getElementById('update-lightspeed-btn');
+    if (updateLsBtn) {
+      updateLsBtn.addEventListener('click', async () => {
+        if (!confirm(`Push these changes to the existing Lightspeed Quote QN${r.lightspeed_quote_id}?`)) return;
+        updateLsBtn.disabled = true;
+        updateLsBtn.textContent = 'Updating…';
+        try {
+          const res = await fetch(`${API}/api/records/${r.id}/update-lightspeed`, {
+            method: 'POST', headers: { Authorization: `Bearer ${TOKEN}` },
+          });
+          const data = await res.json();
+          if (!res.ok) {
+            const msg = data.problems && data.problems.length
+              ? `${data.error}:\n${data.problems.map(p => '- ' + p).join('\n')}`
+              : (data.error || 'Update failed');
+            throw new Error(msg);
+          }
+          showToast('Lightspeed updated');
+          renderDetail(r.id);
+        } catch (err) {
+          alert(err.message);
+          updateLsBtn.disabled = false;
+          updateLsBtn.textContent = 'Update Lightspeed';
+        }
+      });
+    }
+
+    const editQuoteBtn = document.getElementById('edit-quote-btn');
+    if (editQuoteBtn) {
+      editQuoteBtn.addEventListener('click', () => renderQuoteEditForm(r));
+    }
+
     renderPhotoSections(r);
     renderWorkflowPanel(r);
     if (r.lightspeed_quote_id && !r.lightspeed_sale_completed_at) {
@@ -1267,6 +1307,159 @@ async function renderDetail(id) {
   } catch (err) {
     app.innerHTML = `<div class="screen"><div class="empty-state">Couldn't load record.<br/>${esc(err.message)}</div></div>`;
   }
+}
+
+// Swaps the read-only Quote section (inside #quote-content, see renderDetail)
+// for an editable line-items builder -- a deliberately separate, self-
+// contained implementation from the "build a brand-new quote" flow in
+// renderWorkflowPanel's 'quoted' branch, rather than a shared abstraction:
+// the two flows genuinely differ (this one never touches quote_status/stage,
+// has no Skip-quote/refurb decision, and saves via PUT .../quote instead of
+// POST). Hides the Lightspeed push panel while editing -- nothing in it is
+// meaningful until the edit is saved or cancelled.
+function renderQuoteEditForm(r) {
+  const contentEl = document.getElementById('quote-content');
+  const pushPanelEl = document.getElementById('lightspeed-push-panel');
+  if (pushPanelEl) pushPanelEl.style.display = 'none';
+
+  let editItems = (r.line_items || []).map(li => ({ ...li }));
+  let partsCache = [];
+  const isDealer = r.source_type !== 'customer';
+
+  contentEl.innerHTML = `
+    <div class="field">
+      <label>Search parts</label>
+      <input type="text" id="eq-parts-search" placeholder="Search by SKU or description..." autocomplete="off" />
+      <div id="eq-parts-results"></div>
+    </div>
+    <div id="eq-line-items"></div>
+    <button type="button" class="btn btn-ghost btn-small" id="eq-add-custom-line">+ Add custom line</button>
+    <div class="detail-row" style="margin-top:10px">
+      <span class="k">Total</span><span class="v" id="eq-total" style="font-weight:700">R0.00</span>
+    </div>
+    <div class="field" style="margin-top:12px">
+      <label>Notes (optional)</label>
+      <textarea id="eq-notes">${esc(r.quote_notes)}</textarea>
+    </div>
+    <button type="button" class="btn btn-primary" id="eq-save">Save changes</button>
+    <button type="button" class="btn btn-ghost" id="eq-cancel">Cancel</button>
+  `;
+
+  function updateTotal() {
+    const total = editItems.reduce((s, li) => s + (Number(li.unit_price) || 0) * (Number(li.quantity) || 0), 0);
+    document.getElementById('eq-total').textContent = fmtMoney(total);
+  }
+
+  function renderRows() {
+    const container = document.getElementById('eq-line-items');
+    container.innerHTML = editItems.map((li, i) => `
+      <div class="quote-line-row">
+        <input type="text" class="quote-line-desc eq-line-desc" data-idx="${i}" value="${esc(li.description)}" placeholder="Description" />
+        <div class="quote-line-controls">
+          ${li.sku ? `<span class="quote-line-sku">${esc(li.sku)}</span>` : ''}
+          <select class="quote-line-category eq-line-category" data-idx="${i}">
+            ${Object.entries(PART_CATEGORIES).map(([val, label]) => `<option value="${val}" ${li.category === val ? 'selected' : ''}>${label}</option>`).join('')}
+          </select>
+          <input type="number" class="quote-line-qty eq-line-qty" data-idx="${i}" value="${li.quantity}" min="0.01" step="0.01" />
+          <span>&times;</span>
+          ${li.original_unit_price ? `<span class="discount-strike">${fmtMoney(li.original_unit_price)}</span>` : ''}
+          <input type="number" class="quote-line-price eq-line-price" data-idx="${i}" value="${li.unit_price}" min="0" step="0.01" />
+          ${li.original_unit_price ? `<span class="discount-badge">${DEALER_PARTS_DISCOUNT * 100}% off</span>` : ''}
+          <span class="quote-line-total">${fmtMoney((Number(li.unit_price) || 0) * (Number(li.quantity) || 0))}</span>
+          <button type="button" class="quote-line-remove" data-idx="${i}" aria-label="Remove line">&times;</button>
+        </div>
+      </div>
+    `).join('');
+
+    container.querySelectorAll('.eq-line-desc').forEach(inp => {
+      inp.addEventListener('input', (e) => { editItems[Number(e.target.dataset.idx)].description = e.target.value; });
+    });
+    container.querySelectorAll('.eq-line-category').forEach(sel => {
+      sel.addEventListener('change', (e) => { editItems[Number(e.target.dataset.idx)].category = e.target.value; });
+    });
+    container.querySelectorAll('.eq-line-qty, .eq-line-price').forEach(inp => {
+      inp.addEventListener('input', (e) => {
+        const idx = Number(e.target.dataset.idx);
+        const key = e.target.classList.contains('eq-line-qty') ? 'quantity' : 'unit_price';
+        editItems[idx][key] = Number(e.target.value) || 0;
+        // A hand-edited price is a deliberate override -- the line no longer
+        // reflects the catalog's own retail price, dealer-discounted or not,
+        // so its struck-through "original" figure/badge is now stale and
+        // must be cleared, same rule the quote-builder flow already applies.
+        if (key === 'unit_price') editItems[idx].original_unit_price = null;
+        updateTotal();
+        renderRows();
+      });
+    });
+    container.querySelectorAll('.quote-line-remove').forEach(btn => {
+      btn.addEventListener('click', () => {
+        editItems.splice(Number(btn.dataset.idx), 1);
+        renderRows();
+        updateTotal();
+      });
+    });
+  }
+
+  function renderPartsResults(query) {
+    const resultsEl = document.getElementById('eq-parts-results');
+    const q = query.trim().toLowerCase();
+    if (!q) { resultsEl.innerHTML = ''; return; }
+    const matches = partsCache.filter(p =>
+      (p.sku || '').toLowerCase().includes(q) || (p.description || '').toLowerCase().includes(q)
+    ).slice(0, 8);
+    if (!matches.length) {
+      resultsEl.innerHTML = `<div class="parts-result-empty">No matching parts</div>`;
+      return;
+    }
+    resultsEl.innerHTML = matches.map((p, i) => `
+      <div class="parts-result-row" data-idx="${i}">
+        <span class="quote-line-sku">${esc(p.sku || '')}</span>
+        <span>${esc(p.description)}</span>
+        <span>${fmtMoney(p.retail_price)}</span>
+      </div>
+    `).join('');
+    resultsEl.querySelectorAll('.parts-result-row').forEach(row => {
+      row.addEventListener('click', () => {
+        const p = matches[Number(row.dataset.idx)];
+        const retailPrice = Number(p.retail_price) || 0;
+        const category = p.category || 'part';
+        const discounted = isDealer && category === 'part';
+        editItems.push({
+          sku: p.sku || '', description: p.description, quantity: 1, category,
+          unit_price: discounted ? Math.round(retailPrice * (1 - DEALER_PARTS_DISCOUNT) * 100) / 100 : retailPrice,
+          original_unit_price: discounted ? retailPrice : null,
+          lightspeed_sale_line_id: null,
+        });
+        renderRows();
+        updateTotal();
+        document.getElementById('eq-parts-search').value = '';
+        resultsEl.innerHTML = '';
+      });
+    });
+  }
+
+  api('/api/parts').then(parts => { partsCache = parts; }).catch(() => { partsCache = []; });
+  document.getElementById('eq-parts-search').addEventListener('input', (e) => renderPartsResults(e.target.value));
+  document.getElementById('eq-add-custom-line').addEventListener('click', () => {
+    editItems.push({ sku: '', description: '', unit_price: 0, quantity: 1, category: 'part', original_unit_price: null, lightspeed_sale_line_id: null });
+    renderRows();
+    updateTotal();
+  });
+  document.getElementById('eq-cancel').addEventListener('click', () => renderDetail(r.id));
+  document.getElementById('eq-save').addEventListener('click', async () => {
+    const quote_notes = document.getElementById('eq-notes').value.trim();
+    const validItems = editItems.filter(li => li.description.trim());
+    if (!validItems.length) { showToast('Add at least one part or line item'); return; }
+    if (validItems.some(li => !li.unit_price && li.unit_price !== 0)) { showToast('Every line needs a price'); return; }
+    try {
+      await api(`/api/records/${r.id}/quote`, { method: 'PUT', body: JSON.stringify({ line_items: validItems, quote_notes }) });
+      showToast('Quote updated');
+      renderDetail(r.id);
+    } catch (err) { showToast(err.message); }
+  });
+
+  renderRows();
+  updateTotal();
 }
 
 function renderPhotoSections(r) {
