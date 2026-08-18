@@ -1917,6 +1917,10 @@ function updateSentByLayout() {
   const nameWrap = document.getElementById('f-dealer-name-wrap');
   const nameLabel = document.getElementById('f-dealer-name-label');
   const selectEl = document.getElementById('f-dealer-select');
+  const issueLabelSubject = document.getElementById('f-issue-label-subject');
+  if (issueLabelSubject) issueLabelSubject.textContent = `What the ${sourceType === 'customer' ? 'customer' : 'dealer'} says is wrong`;
+  const referenceLabel = document.getElementById('f-dealer-reference-label');
+  if (referenceLabel) referenceLabel.textContent = sourceType === 'customer' ? "Customer's reference" : "Dealer's reference";
   if (sourceType === 'customer') {
     selectWrap.style.display = 'none';
     nameWrap.style.display = '';
@@ -2096,7 +2100,7 @@ function renderForm(record) {
             <input type="text" id="f-contact" value="${esc(r.dealer_contact)}" placeholder="Phone or email" />
           </div>
           <div class="field">
-            <label>Dealer's reference</label>
+            <label id="f-dealer-reference-label">${r.source_type === 'customer' ? "Customer's reference" : "Dealer's reference"}</label>
             <input type="text" id="f-dealer-reference" value="${esc(r.dealer_reference)}" placeholder="Their own job / customer ref" maxlength="200" />
           </div>
 
@@ -2175,7 +2179,7 @@ function renderForm(record) {
 
           <div class="section-label">Issue reported</div>
           <div class="field">
-            <label class="field-label-row">What the ${r.source_type === 'customer' ? 'customer' : 'dealer'} says is wrong <button type="button" class="fix-spelling-btn" data-target="f-issue">&#10003; Fix spelling</button></label>
+            <label class="field-label-row"><span id="f-issue-label-subject">What the ${r.source_type === 'customer' ? 'customer' : 'dealer'} says is wrong</span> <button type="button" class="fix-spelling-btn" data-target="f-issue">&#10003; Fix spelling</button></label>
             <textarea id="f-issue" spellcheck="true">${esc(r.issue_reported)}</textarea>
           </div>
           ${isEdit ? `
