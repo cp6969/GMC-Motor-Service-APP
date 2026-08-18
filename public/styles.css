@@ -271,7 +271,8 @@ input:focus, textarea:focus, select:focus, button:focus-visible {
 }
 .record-card:active { background: var(--panel-raised); }
 
-a.record-card {
+a.record-card,
+.record-card-link {
   display: block;
   text-decoration: none;
   color: inherit;

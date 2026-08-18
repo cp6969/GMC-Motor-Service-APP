@@ -261,7 +261,7 @@ app.post('/api/records', authMiddleware, (req, res) => {
   const {
     serial_number, brand, model, dealer_name, dealer_contact, source_type,
     date_received, date_completed, status, issue_reported,
-    work_performed, parts_replaced, technician, notes,
+    work_performed, parts_replaced, technician, notes, dealer_reference,
     lightspeed_customer_id, lightspeed_customer_name
   } = req.body;
 
@@ -295,8 +295,8 @@ app.post('/api/records', authMiddleware, (req, res) => {
     INSERT INTO service_records
     (serial_number, brand, model, dealer_name, dealer_contact, source_type, date_received,
      date_completed, status, issue_reported, work_performed, parts_replaced, technician, notes, share_token,
-     lightspeed_customer_id, lightspeed_customer_name)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     dealer_reference, lightspeed_customer_id, lightspeed_customer_name)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const result = stmt.run(
     serial_number.trim(), brand, model || null, dealer_name || null,
@@ -304,7 +304,7 @@ app.post('/api/records', authMiddleware, (req, res) => {
     status || 'received', issue_reported || null, work_performed || null,
     parts_replaced || null, technician || null, notes || null,
     crypto.randomBytes(12).toString('hex'),
-    lsCustomerId, lsCustomerName
+    dealer_reference || null, lsCustomerId, lsCustomerName
   );
   const record = db.prepare('SELECT * FROM service_records WHERE id = ?').get(result.lastInsertRowid);
   res.status(201).json(record);
@@ -328,7 +328,7 @@ app.put('/api/records/:id', authMiddleware, (req, res) => {
     'serial_number', 'brand', 'model', 'dealer_name', 'dealer_contact', 'source_type',
     'date_received', 'date_completed', 'date_returned', 'status', 'issue_reported', 'damage_found',
     'work_performed', 'parts_replaced', 'technician', 'notes',
-    'quote_amount', 'quote_notes', 'refurb_serial',
+    'quote_amount', 'quote_notes', 'refurb_serial', 'dealer_reference',
     'lightspeed_customer_id', 'lightspeed_customer_name'
   ];
   const updates = {};
@@ -1411,7 +1411,8 @@ app.get('/api/share/dealer/:token', (req, res) => {
   if (!dealer) return res.status(404).json({ error: 'Not found' });
 
   const records = db.prepare(`
-    SELECT id, share_token, serial_number, brand, model, status, date_received, date_completed, date_returned
+    SELECT id, share_token, serial_number, brand, model, status, date_received, date_completed, date_returned,
+           dealer_reference, lightspeed_quote_id, lightspeed_sale_id, lightspeed_sale_completed_at
     FROM service_records
     WHERE dealer_name = ? COLLATE NOCASE
     ORDER BY date_received DESC, id DESC
@@ -1426,6 +1427,23 @@ app.get('/api/share/dealer/:token', (req, res) => {
 app.get('/share/dealer/:token', (req, res) => {
   res.set('Cache-Control', 'no-store');
   res.sendFile(path.join(__dirname, 'public', 'dealer-share.html'));
+});
+
+// Lets a dealer set their own reference/label on a motor from their permanent
+// history link (no auth -- gated instead by knowing the dealer's own share
+// token, same trust model as the rest of this page). Scoped to records that
+// actually belong to that dealer so one dealer's token can't touch another's.
+app.put('/api/share/dealer/:token/records/:recordId/reference', (req, res) => {
+  const dealer = db.prepare('SELECT * FROM dealers WHERE share_token = ?').get(req.params.token);
+  if (!dealer) return res.status(404).json({ error: 'Not found' });
+
+  const record = db.prepare('SELECT id FROM service_records WHERE id = ? AND dealer_name = ? COLLATE NOCASE')
+    .get(req.params.recordId, dealer.name);
+  if (!record) return res.status(404).json({ error: 'Not found' });
+
+  const dealerReference = (req.body.dealer_reference || '').trim().slice(0, 200);
+  db.prepare('UPDATE service_records SET dealer_reference = ? WHERE id = ?').run(dealerReference || null, record.id);
+  res.json({ success: true, dealer_reference: dealerReference || null });
 });
 
 // Fallback to index.html for SPA routing

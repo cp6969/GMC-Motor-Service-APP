@@ -1175,6 +1175,7 @@ async function renderDetail(id) {
             <div class="section-label">${r.source_type === 'customer' ? 'Customer' : 'Dealer'}</div>
             <div class="detail-row"><span class="k">Sent by</span><span class="v">${esc(r.dealer_alias || r.dealer_name) || '—'}${r.dealer_alias && r.dealer_alias !== r.dealer_name ? ` <span class="hint-text" style="margin:0">(${esc(r.dealer_name)})</span>` : ''}</span></div>
             <div class="detail-row"><span class="k">Contact</span><span class="v">${esc(r.dealer_contact) || '—'}</span></div>
+            <div class="detail-row"><span class="k">Their reference</span><span class="v">${esc(r.dealer_reference) || '—'}</span></div>
             <div class="detail-row"><span class="k">Lightspeed</span><span class="v">${r.lightspeed_customer_id ? `🔗 ${esc(r.lightspeed_customer_name)}` : '<span class="hint-text" style="margin:0">Not linked</span>'}</span></div>
 
             <div class="section-label">Motor</div>
@@ -2030,7 +2031,7 @@ function renderForm(record) {
     serial_number: '', brand: '', model: '', dealer_name: '', dealer_contact: '', source_type: 'dealer',
     date_received: new Date().toISOString().slice(0, 10), date_completed: '', date_returned: '',
     status: 'received', issue_reported: '', work_performed: '',
-    technician: '', notes: '', quote_amount: '', quote_notes: ''
+    technician: '', notes: '', quote_amount: '', quote_notes: '', dealer_reference: ''
   };
 
   app.innerHTML = `
@@ -2064,6 +2065,10 @@ function renderForm(record) {
           <div class="field">
             <label>Contact</label>
             <input type="text" id="f-contact" value="${esc(r.dealer_contact)}" placeholder="Phone or email" />
+          </div>
+          <div class="field">
+            <label>Dealer's reference</label>
+            <input type="text" id="f-dealer-reference" value="${esc(r.dealer_reference)}" placeholder="Their own job / customer ref" maxlength="200" />
           </div>
 
           <div class="section-label">Motor</div>
@@ -2306,6 +2311,7 @@ function renderForm(record) {
       model: document.getElementById('f-model').value.trim(),
       dealer_name: dealerName,
       dealer_contact: document.getElementById('f-contact').value.trim(),
+      dealer_reference: document.getElementById('f-dealer-reference').value.trim(),
       source_type: sourceType,
       date_received: document.getElementById('f-date-received').value,
       issue_reported: document.getElementById('f-issue').value.trim(),
