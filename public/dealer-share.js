@@ -92,19 +92,28 @@ function render(data) {
         </a>
         <div class="field dealer-reference-field" style="margin-top:10px">
           <label>Your reference</label>
-          <input type="text" class="dealer-reference-input" placeholder="e.g. your own job / customer ref" value="${esc(r.dealer_reference)}" maxlength="200" />
+          <div style="display:flex;gap:8px;align-items:flex-start">
+            <input type="text" class="dealer-reference-input" placeholder="e.g. your own job / customer ref" value="${esc(r.dealer_reference)}" maxlength="200" style="flex:1" />
+            <button type="button" class="btn btn-secondary dealer-reference-save" style="width:auto;padding:10px 16px;white-space:nowrap">Save</button>
+          </div>
+          <div class="hint-text dealer-reference-status" style="margin-top:4px;min-height:1em"></div>
         </div>
       </div>
     `;
   }).join('');
 
-  listEl.querySelectorAll('.dealer-reference-input').forEach(input => {
-    const card = input.closest('.record-card');
+  listEl.querySelectorAll('.record-card').forEach(card => {
     const recordId = card.dataset.recordId;
+    const input = card.querySelector('.dealer-reference-input');
+    const saveBtn = card.querySelector('.dealer-reference-save');
+    const status = card.querySelector('.dealer-reference-status');
     let originalValue = input.value;
+
     const save = async () => {
       const value = input.value.trim();
       if (value === originalValue) return;
+      saveBtn.disabled = true;
+      saveBtn.textContent = 'Saving…';
       try {
         const res = await fetch(`/api/share/dealer/${tokenFromUrl()}/records/${recordId}/reference`, {
           method: 'PUT',
@@ -113,15 +122,23 @@ function render(data) {
         });
         if (!res.ok) throw new Error();
         originalValue = value;
+        status.textContent = 'Saved';
+        setTimeout(() => { if (status.textContent === 'Saved') status.textContent = ''; }, 2000);
       } catch (err) {
         input.value = originalValue;
+        status.textContent = "Couldn't save -- try again";
+      } finally {
+        saveBtn.disabled = false;
+        saveBtn.textContent = 'Save';
       }
     };
+
     input.addEventListener('click', e => e.stopPropagation());
-    input.addEventListener('blur', save);
+    input.addEventListener('input', () => { status.textContent = ''; });
     input.addEventListener('keydown', e => {
-      if (e.key === 'Enter') input.blur();
+      if (e.key === 'Enter') { e.preventDefault(); save(); }
     });
+    saveBtn.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); save(); });
   });
 }
 

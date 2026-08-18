@@ -107,6 +107,7 @@ addColumnIfMissing('service_records', 'refurb_serial', 'TEXT');
 addColumnIfMissing('service_records', 'refurb_suggested', 'INTEGER DEFAULT 0');
 addColumnIfMissing('service_records', 'damage_found', 'TEXT');
 addColumnIfMissing('service_records', 'dealer_reference', 'TEXT');
+addColumnIfMissing('service_records', 'test_ridden_at', 'TEXT');
 addColumnIfMissing('service_images', 'category', "TEXT DEFAULT 'other'");
 addColumnIfMissing('dealers', 'share_token', 'TEXT');
 addColumnIfMissing('dealers', 'lightspeed_customer_id', 'TEXT');
