@@ -1139,14 +1139,16 @@ async function loadRecords() {
         <div class="record-card" style="border-left-color:${meta.color}" data-id="${r.id}">
           <div class="record-card-top">
             <span class="record-card-title">${esc(r.dealer_alias || r.dealer_name) || '—'}</span>
-            <span class="status-badge" style="background:${meta.color};color:#15171B">${meta.label}</span>
+            <span style="display:flex;align-items:center;gap:6px">
+              ${quoteMiniBadge(r)}
+              <span class="status-badge" style="background:${meta.color};color:#15171B">${meta.label}</span>
+            </span>
           </div>
           <div class="record-card-meta">
             ${r.brand ? `<span class="record-card-brand">${esc(r.brand)}${r.model ? ' ' + esc(r.model) : ''}</span>` : ''}
             <span class="record-card-serial">&middot; ${esc(r.serial_number)}</span>
             ${r.date_received ? `<span>&middot; in ${esc(r.date_received)}</span>` : ''}
             ${r.image_count ? `<span>&middot; &#128247; ${r.image_count}</span>` : ''}
-            ${quoteMiniBadge(r)}
           </div>
         </div>
       `;
