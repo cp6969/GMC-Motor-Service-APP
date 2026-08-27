@@ -164,6 +164,11 @@ async function loadRecords() {
     if (!term) return renderList(allRecords);
     renderList(allRecords.filter(r =>
       (r.serial_number || '').toLowerCase().includes(term) ||
+      // A refurb swap means the serial actually out in the field is the
+      // replacement motor's, not the original record's -- search needs to
+      // match that too, or a lookup on the motor someone has in hand today
+      // comes up empty.
+      (r.refurb_serial || '').toLowerCase().includes(term) ||
       (r.brand || '').toLowerCase().includes(term) ||
       (r.dealer_name || '').toLowerCase().includes(term)
     ));
