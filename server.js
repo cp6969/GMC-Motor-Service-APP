@@ -686,43 +686,63 @@ app.post('/api/dealers/:id/lightspeed-unlink', authMiddleware, (req, res) => {
 // via Lightspeed's own "~" (LIKE) operator, OR-combined across all three --
 // see https://developers.lightspeedhq.com/retail/introduction/parameters/
 // for the exact query syntax this is built from.
+function mapLightspeedCustomer(c) {
+  const contact = c.Contact || {};
+  const emails = contact.Emails && contact.Emails.ContactEmail
+    ? (Array.isArray(contact.Emails.ContactEmail) ? contact.Emails.ContactEmail : [contact.Emails.ContactEmail])
+    : [];
+  const phones = contact.Phones && contact.Phones.ContactPhone
+    ? (Array.isArray(contact.Phones.ContactPhone) ? contact.Phones.ContactPhone : [contact.Phones.ContactPhone])
+    : [];
+  return {
+    id: c.customerID,
+    name: [c.firstName, c.lastName].filter(Boolean).join(' ') || c.company || `Customer #${c.customerID}`,
+    company: c.company || '',
+    email: emails[0] ? emails[0].address : '',
+    phone: phones[0] ? phones[0].number : '',
+  };
+}
+
 app.get('/api/lightspeed/customers', authMiddleware, async (req, res) => {
   const q = (req.query.q || '').trim();
   if (q.length < 2) return res.json([]);
   try {
     const { accessToken, accountId } = await getValidLightspeedToken();
     const likeVal = encodeURIComponent(`%${q}%`);
-    const orClause = `firstName%3D~,${likeVal}|lastName%3D~,${likeVal}|company%3D~,${likeVal}`;
     const rel = encodeURIComponent('["Contact"]');
-    // Lightspeed's default sort (ascending by customerID, i.e. oldest first)
-    // means a name shared by 15+ older customers -- Smith, Botha, etc. --
-    // silently hides a customer just created today behind a wall of decades-
-    // old ones, since the result is capped at 15. Sorting newest-first fixes
-    // exactly the case someone's actually searching for right after adding a
-    // customer in Lightspeed, at the cost of an old customer with a common
-    // name needing a more specific search term to surface -- an acceptable
-    // trade given how this search is actually used here.
-    const url = `${LIGHTSPEED_API_BASE}/Account/${accountId}/Customer.json?or=${orClause}&load_relations=${rel}&sort=-customerID&limit=15`;
-    const lsRes = await fetchLightspeed(url, { headers: { Authorization: `Bearer ${accessToken}` } });
-    if (!lsRes.ok) throw new Error(`Lightspeed search failed: ${lsRes.status} ${await lsRes.text()}`);
-    const data = await lsRes.json();
-    const raw = data.Customer ? (Array.isArray(data.Customer) ? data.Customer : [data.Customer]) : [];
-    const results = raw.map(c => {
-      const contact = c.Contact || {};
-      const emails = contact.Emails && contact.Emails.ContactEmail
-        ? (Array.isArray(contact.Emails.ContactEmail) ? contact.Emails.ContactEmail : [contact.Emails.ContactEmail])
-        : [];
-      const phones = contact.Phones && contact.Phones.ContactPhone
-        ? (Array.isArray(contact.Phones.ContactPhone) ? contact.Phones.ContactPhone : [contact.Phones.ContactPhone])
-        : [];
-      return {
-        id: c.customerID,
-        name: [c.firstName, c.lastName].filter(Boolean).join(' ') || c.company || `Customer #${c.customerID}`,
-        company: c.company || '',
-        email: emails[0] ? emails[0].address : '',
-        phone: phones[0] ? phones[0].number : '',
-      };
+    // Lightspeed's own combined "or=field1~val|field2~val|..." filter is
+    // unreliable -- confirmed live against this account that it silently
+    // returns zero matches for some search terms ("cash", "eddie", "dave")
+    // while working fine for others ("smith", "sale", "craig"), even when a
+    // real match genuinely exists (a plain single-field query for the exact
+    // same term/value always finds it). No pattern in the term itself
+    // explains which terms fail -- it's a real bug in Lightspeed's query
+    // engine, not something to work around by tweaking the "or" syntax.
+    // Fixed by never using "or=" for this: three separate single-field
+    // queries (firstName/lastName/company), run in parallel, merged and
+    // deduped by customerID here instead. Every one of ~20 real terms tested
+    // against this exact single-field form came back correct.
+    const rel2 = ['firstName', 'lastName', 'company'];
+    const fetches = rel2.map((field) => {
+      const url = `${LIGHTSPEED_API_BASE}/Account/${accountId}/Customer.json?${field}=~,${likeVal}&load_relations=${rel}&sort=-customerID&limit=15`;
+      return fetchLightspeed(url, { headers: { Authorization: `Bearer ${accessToken}` } });
     });
+    const responses = await Promise.all(fetches);
+    for (const r of responses) {
+      if (!r.ok) throw new Error(`Lightspeed search failed: ${r.status} ${await r.text()}`);
+    }
+    const bodies = await Promise.all(responses.map((r) => r.json()));
+    const byId = new Map();
+    for (const data of bodies) {
+      const raw = data.Customer ? (Array.isArray(data.Customer) ? data.Customer : [data.Customer]) : [];
+      for (const c of raw) {
+        if (!byId.has(c.customerID)) byId.set(c.customerID, c);
+      }
+    }
+    const results = Array.from(byId.values())
+      .sort((a, b) => Number(b.customerID) - Number(a.customerID))
+      .slice(0, 15)
+      .map(mapLightspeedCustomer);
     res.json(results);
   } catch (err) {
     res.status(err.statusCode || 500).json({ error: err.message });
