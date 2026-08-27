@@ -64,20 +64,11 @@ input:focus, textarea:focus, select:focus, button:focus-visible {
   text-align: center;
 }
 
-.login-mark {
-  width: 64px;
-  height: 64px;
+.login-logo {
+  height: 56px;
+  width: auto;
   margin: 0 auto 18px;
-  border-radius: 50%;
-  border: 3px solid var(--accent);
-  position: relative;
-}
-.login-mark::after {
-  content: "";
-  position: absolute;
-  inset: 22px;
-  background: var(--accent);
-  border-radius: 50%;
+  display: block;
 }
 
 .login-title {
