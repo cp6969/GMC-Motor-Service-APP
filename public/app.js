@@ -259,8 +259,8 @@ function renderLogin(errorMsg) {
     <div class="login-screen">
       <div class="login-card">
         <img class="login-logo" src="/gmc-logo.png" alt="Greg Minnaar Cycles" />
-        <h1 class="login-title">GMC Motor Service Log</h1>
-        <p class="login-sub">Greg Minnaar Cycles &middot; Workshop access</p>
+        <h1 class="login-title">Motor Service Log</h1>
+        <p class="login-sub">Workshop access</p>
         <form id="login-form">
           <div class="field">
             <label for="passcode">Workshop passcode</label>
