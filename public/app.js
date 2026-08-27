@@ -260,10 +260,10 @@ function renderLogin(errorMsg) {
       <div class="login-card">
         <img class="login-logo" src="/gmc-logo.png" alt="Greg Minnaar Cycles" />
         <h1 class="login-title">Motor Service Log</h1>
-        <p class="login-sub">Workshop access</p>
+        <p class="login-sub">Log in to continue</p>
         <form id="login-form">
           <div class="field">
-            <label for="passcode">Workshop passcode</label>
+            <label for="passcode">Passcode</label>
             <input type="password" id="passcode" inputmode="text" autocomplete="current-password" autofocus />
           </div>
           <button class="btn btn-primary btn-block" type="submit">Log in</button>
@@ -275,14 +275,38 @@ function renderLogin(errorMsg) {
   document.getElementById('login-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const passcode = document.getElementById('passcode').value;
+    // One passcode field serves two audiences: try it as the internal
+    // workshop passcode first, and only if that's rejected, try it as the
+    // Specialized partner passcode -- so nobody has to know there even are
+    // two logins, let alone find the separate /partner URL. Raw fetch here
+    // (not the api() helper) since api() auto-redirects to the login screen
+    // on any 401, which would short-circuit the partner fallback below.
     try {
-      const data = await api('/api/login', { method: 'POST', body: JSON.stringify({ passcode }) });
-      TOKEN = data.token;
-      localStorage.setItem('gmc_token', TOKEN);
-      renderBoard();
-    } catch (err) {
-      renderLogin('Incorrect passcode. Try again.');
-    }
+      const res = await fetch(`${API}/api/login`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ passcode }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        TOKEN = data.token;
+        localStorage.setItem('gmc_token', TOKEN);
+        renderBoard();
+        return;
+      }
+    } catch (err) { /* network error -- fall through and let the partner attempt below report it */ }
+
+    try {
+      const partnerRes = await fetch(`${API}/api/partner/login`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ passcode }),
+      });
+      if (partnerRes.ok) {
+        const partnerData = await partnerRes.json();
+        localStorage.setItem('gmc_partner_token', partnerData.token);
+        window.location.href = '/partner';
+        return;
+      }
+    } catch (err) { /* fall through to the generic error below */ }
+
+    renderLogin('Incorrect passcode. Try again.');
   });
 }
 

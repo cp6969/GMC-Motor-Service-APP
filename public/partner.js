@@ -32,9 +32,9 @@ function renderLogin(errorMsg) {
   app.innerHTML = `
     <div class="login-screen">
       <div class="login-card">
-        <div class="login-mark"></div>
+        <img class="login-logo" src="/gmc-logo.png" alt="Greg Minnaar Cycles" />
         <h1 class="login-title">Motor Service Records</h1>
-        <p class="login-sub">Greg Minnaar Cycles &middot; Specialized partner access</p>
+        <p class="login-sub">Specialized partner access</p>
         <form id="login-form">
           <div class="field">
             <label for="passcode">Passcode</label>
