@@ -355,6 +355,20 @@ function renderSettings() {
             <button type="submit" class="btn btn-primary" id="passcode-save-btn">Update passcode</button>
           </form>
           <p class="hint-text">Everyone at the workshop shares this one passcode to log in — updating it here takes effect immediately for new logins. Devices already logged in stay logged in until they log out.</p>
+
+          <div class="section-label">Specialized partner access</div>
+          <p class="hint-text" style="margin-top:0">A read-only page at <code>/partner</code> where Specialized's office staff can search any motor's serial number to check whether it was serviced here, and what was found/done — no customer contact details, technician names, or pricing shown.</p>
+          <div class="field">
+            <label>Link to give Specialized</label>
+            <input type="text" id="s-partner-link" readonly />
+          </div>
+          <form id="specialized-passcode-form">
+            <div class="field">
+              <label>Passcode</label>
+              <input type="text" id="s-specialized-passcode" autocomplete="off" required minlength="4" />
+            </div>
+            <button type="submit" class="btn btn-secondary" id="specialized-passcode-save-btn">Update passcode</button>
+          </form>
         </div>
 
         <div class="settings-panel" data-panel="lightspeed" style="display:none">
@@ -461,6 +475,7 @@ function renderSettings() {
   loadLightspeedStatus();
   loadLightspeedEmployeeSetting();
   loadDealersSettings();
+  loadSpecializedPasscode();
 
   wireLightspeedSearch(
     document.getElementById('dealer-ls-add-search-input'),
@@ -576,6 +591,28 @@ function renderSettings() {
       showToast(err.message);
     }
   });
+
+  document.getElementById('s-partner-link').value = `${location.origin}/partner`;
+
+  document.getElementById('specialized-passcode-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const new_passcode = document.getElementById('s-specialized-passcode').value;
+    try {
+      await api('/api/settings/specialized-passcode', { method: 'POST', body: JSON.stringify({ new_passcode }) });
+      showToast('Specialized passcode updated');
+    } catch (err) {
+      showToast(err.message);
+    }
+  });
+}
+
+async function loadSpecializedPasscode() {
+  const input = document.getElementById('s-specialized-passcode');
+  if (!input) return;
+  try {
+    const data = await api('/api/settings/specialized-passcode');
+    input.value = data.passcode || '';
+  } catch (err) { /* leave blank on failure */ }
 }
 
 async function loadLightspeedEmployeeSetting() {

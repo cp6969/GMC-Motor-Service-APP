@@ -184,6 +184,15 @@ if (getSetting('passcode') === null) {
   setSetting('passcode', process.env.APP_PASSCODE || 'changeme');
 }
 
+// Separate shared passcode for Specialized's own read-only partner view
+// (see server.js's "Specialized partner view" section) -- randomly
+// generated on first run rather than a guessable default, since the owner
+// has to explicitly go look it up in Settings before it's ever handed to
+// anyone anyway.
+if (getSetting('specialized_passcode') === null) {
+  setSetting('specialized_passcode', crypto.randomBytes(6).toString('hex'));
+}
+
 // One-time backfill: any dealer name already used on a real (source_type = 'dealer')
 // service record, but not yet in the dealers table, is added so the new dealer
 // picker isn't empty on first use. Idempotent (only inserts names not already present),

@@ -158,12 +158,36 @@ app.use(express.static(path.join(__dirname, 'public'), {
 }));
 
 // ---------- Auth ----------
+// Two separate JWT roles share this one secret: an internal workshop token
+// (`{ workshop: 'gmc' }`, full read/write access to everything below) and a
+// Specialized partner token (`{ role: 'specialized' }`, read-only access to
+// the one restricted endpoint under "Specialized partner view" further
+// down). authMiddleware requires the workshop claim specifically -- a valid
+// but partner-issued token is rejected here, and partnerAuthMiddleware
+// requires the specialized claim specifically -- a valid but internal
+// token is rejected there. Neither token can be used to authenticate as
+// the other, so a leaked partner passcode can never reach a create/edit/
+// delete route, and vice versa.
 function authMiddleware(req, res, next) {
   const header = req.headers.authorization || '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
   if (!token) return res.status(401).json({ error: 'Not authenticated' });
   try {
-    jwt.verify(token, JWT_SECRET);
+    const payload = jwt.verify(token, JWT_SECRET);
+    if (payload.workshop !== 'gmc') throw new Error('wrong role');
+    next();
+  } catch (e) {
+    return res.status(401).json({ error: 'Invalid or expired session' });
+  }
+}
+
+function partnerAuthMiddleware(req, res, next) {
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+  if (!token) return res.status(401).json({ error: 'Not authenticated' });
+  try {
+    const payload = jwt.verify(token, JWT_SECRET);
+    if (payload.role !== 'specialized') throw new Error('wrong role');
     next();
   } catch (e) {
     return res.status(401).json({ error: 'Invalid or expired session' });
@@ -189,6 +213,25 @@ app.post('/api/settings/passcode', authMiddleware, (req, res) => {
   }
   db.setSetting('passcode', new_passcode);
   res.json({ success: true });
+});
+
+// Lets the owner see the current Specialized passcode (to hand it to them)
+// and set a new one, from the internal Settings page -- gated by the
+// existing internal authMiddleware, same trust level as every other
+// Settings action. No "current passcode" confirmation needed here (unlike
+// the workshop passcode above) since reaching this route already required
+// a valid internal login.
+app.get('/api/settings/specialized-passcode', authMiddleware, (req, res) => {
+  res.json({ passcode: db.getSetting('specialized_passcode') });
+});
+
+app.post('/api/settings/specialized-passcode', authMiddleware, (req, res) => {
+  const { new_passcode } = req.body;
+  if (!new_passcode || new_passcode.length < 4) {
+    return res.status(400).json({ error: 'New passcode must be at least 4 characters' });
+  }
+  db.setSetting('specialized_passcode', new_passcode);
+  res.json({ success: true, passcode: new_passcode });
 });
 
 // ---------- Image upload config ----------
@@ -1483,6 +1526,44 @@ app.put('/api/share/dealer/:token/records/:recordId/reference', (req, res) => {
   const dealerReference = (req.body.dealer_reference || '').trim().slice(0, 200);
   db.prepare('UPDATE service_records SET dealer_reference = ? WHERE id = ?').run(dealerReference || null, record.id);
   res.json({ success: true, dealer_reference: dealerReference || null });
+});
+
+// ---------- Specialized partner view (read-only) ----------
+// Gives Specialized's own office staff a way to check, for any motor serial
+// number, whether GMC actually serviced it and what was found/done -- for
+// resolving a "comeback"/warranty claim against a motor. Deliberately
+// narrower than the internal app: read-only, one shared passcode (set/
+// rotated from internal Settings, see above), and restricted to the fields
+// below -- no customer contact details, no technician name, no quote/
+// pricing data, no way to browse dealers or anything else. See
+// docs/superpowers/specs/2026-08-27-specialized-partner-view-design.md.
+app.post('/api/partner/login', (req, res) => {
+  const { passcode } = req.body;
+  if (!passcode || passcode !== db.getSetting('specialized_passcode')) {
+    return res.status(401).json({ error: 'Incorrect passcode' });
+  }
+  const token = jwt.sign({ role: 'specialized' }, JWT_SECRET, { expiresIn: '90d' });
+  res.json({ token });
+});
+
+app.get('/api/partner/records', partnerAuthMiddleware, (req, res) => {
+  const records = db.prepare(`
+    SELECT sr.id, sr.serial_number, sr.brand, sr.model, sr.status,
+           sr.date_received, sr.date_completed, sr.date_returned,
+           sr.issue_reported, sr.work_performed, sr.parts_replaced,
+           COALESCE(d.alias, sr.dealer_name) AS dealer_name
+    FROM service_records sr
+    LEFT JOIN dealers d ON d.name = sr.dealer_name COLLATE NOCASE
+    ORDER BY sr.date_received DESC, sr.id DESC
+  `).all();
+
+  const imagesStmt = db.prepare('SELECT filename FROM service_images WHERE record_id = ? ORDER BY created_at ASC');
+  res.json(records.map(r => ({ ...r, images: imagesStmt.all(r.id).map(i => i.filename) })));
+});
+
+app.get('/partner', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.sendFile(path.join(__dirname, 'public', 'partner.html'));
 });
 
 // Fallback to index.html for SPA routing
