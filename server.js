@@ -694,7 +694,15 @@ app.get('/api/lightspeed/customers', authMiddleware, async (req, res) => {
     const likeVal = encodeURIComponent(`%${q}%`);
     const orClause = `firstName%3D~,${likeVal}|lastName%3D~,${likeVal}|company%3D~,${likeVal}`;
     const rel = encodeURIComponent('["Contact"]');
-    const url = `${LIGHTSPEED_API_BASE}/Account/${accountId}/Customer.json?or=${orClause}&load_relations=${rel}&limit=15`;
+    // Lightspeed's default sort (ascending by customerID, i.e. oldest first)
+    // means a name shared by 15+ older customers -- Smith, Botha, etc. --
+    // silently hides a customer just created today behind a wall of decades-
+    // old ones, since the result is capped at 15. Sorting newest-first fixes
+    // exactly the case someone's actually searching for right after adding a
+    // customer in Lightspeed, at the cost of an old customer with a common
+    // name needing a more specific search term to surface -- an acceptable
+    // trade given how this search is actually used here.
+    const url = `${LIGHTSPEED_API_BASE}/Account/${accountId}/Customer.json?or=${orClause}&load_relations=${rel}&sort=-customerID&limit=15`;
     const lsRes = await fetchLightspeed(url, { headers: { Authorization: `Bearer ${accessToken}` } });
     if (!lsRes.ok) throw new Error(`Lightspeed search failed: ${lsRes.status} ${await lsRes.text()}`);
     const data = await lsRes.json();
