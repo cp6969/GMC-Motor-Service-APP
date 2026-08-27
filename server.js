@@ -875,6 +875,53 @@ app.get('/api/lightspeed/items', authMiddleware, async (req, res) => {
   }
 });
 
+// Creates a genuinely new Item directly in Lightspeed -- unlike
+// /api/parts/from-lightspeed above (which links a part the owner already
+// has sitting in Lightspeed), this is for parts that have never existed
+// there before, e.g. used/reconditioned teardown spares with no
+// manufacturer listing to search for. Always non-inventory (these are
+// built up from stripped motors, not stocked/counted units) and the SKU is
+// written to manufacturerSku, the same field every other lookup/verify
+// route in this file already matches against.
+app.post('/api/parts/create-in-lightspeed', authMiddleware, async (req, res) => {
+  const { sku, description, cost, retail_price, category } = req.body;
+  if (!description || !description.trim()) {
+    return res.status(400).json({ error: 'Description is required' });
+  }
+  if (category !== undefined && !PART_CATEGORIES.includes(category)) {
+    return res.status(400).json({ error: `category must be one of: ${PART_CATEGORIES.join(', ')}` });
+  }
+  const costVal = cost === undefined || cost === null || cost === '' ? 0 : Number(cost);
+  const retailVal = retail_price === undefined || retail_price === null || retail_price === '' ? 0 : Number(retail_price);
+  try {
+    const { accessToken, accountId } = await getValidLightspeedToken();
+    const lsRes = await fetchLightspeed(`${LIGHTSPEED_API_BASE}/Account/${accountId}/Item.json`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        description: description.trim(),
+        manufacturerSku: (sku || '').trim() || undefined,
+        defaultCost: String(costVal),
+        itemType: 'non_inventory',
+        Prices: { ItemPrice: [{ useType: 'Default', amount: String(retailVal) }] },
+      }),
+    });
+    if (!lsRes.ok) throw new Error(`Couldn't create Lightspeed item: ${lsRes.status} ${await lsRes.text()}`);
+    const data = await lsRes.json();
+    const item = normalizeLightspeedItem(data.Item);
+    const result = db.prepare(`
+      INSERT INTO parts_catalog (sku, description, cost, retail_price, lightspeed_item_id, lightspeed_synced_at, category)
+      VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+    `).run(
+      item.sku || (sku || '').trim() || null, description.trim(),
+      item.cost, item.retail_price, item.id, category || 'part'
+    );
+    res.status(201).json(db.prepare('SELECT * FROM parts_catalog WHERE id = ?').get(result.lastInsertRowid));
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ error: err.message });
+  }
+});
+
 app.post('/api/parts/from-lightspeed', authMiddleware, (req, res) => {
   const { lightspeed_item_id, sku, description, cost, retail_price, category } = req.body;
   if (!lightspeed_item_id || !description || !description.trim()) {
