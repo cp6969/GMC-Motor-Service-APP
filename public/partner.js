@@ -10,6 +10,7 @@ const STAGE_META = {
   completed:   { label: 'Completed',   color: '#3FBF7F' },
   returned:    { label: 'Returned',    color: '#8A8F98' },
 };
+const REFURB_COLOR = '#4FC3E8';
 
 const app = document.getElementById('app');
 let TOKEN = localStorage.getItem('gmc_partner_token') || null;
@@ -114,18 +115,25 @@ function renderList(records) {
   }
   listEl.innerHTML = records.map(r => {
     const meta = STAGE_META[r.status] || STAGE_META.received;
+    // A refurb swap always wins over the plain returned-to-X label -- the
+    // motor that actually went back isn't the one that came in, so that's
+    // the thing Specialized needs to see at a glance, not just "Returned".
+    const isRefurb = r.quote_status === 'refurb';
     // "Returned" alone doesn't say who it went back to -- spell it out using
     // the same dealer-vs-direct-customer distinction the internal app
     // already tracks per record (source_type), rather than leaving it
     // ambiguous for someone at Specialized who wasn't there for the intake.
-    const badgeLabel = r.status === 'returned'
-      ? (r.source_type === 'customer' ? 'Returned to Customer' : 'Returned to Dealer')
-      : meta.label;
+    const badgeLabel = isRefurb
+      ? 'Refurb Motor Issued'
+      : r.status === 'returned'
+        ? (r.source_type === 'customer' ? 'Returned to Customer' : 'Returned to Dealer')
+        : meta.label;
+    const badgeColor = isRefurb ? REFURB_COLOR : meta.color;
     return `
       <div class="record-card" style="border-left-color:${meta.color}">
         <div class="record-card-top">
           <span class="record-card-title">${esc(r.dealer_name) || 'Direct customer'}</span>
-          <span class="status-badge" style="background:${meta.color};color:#15171B">${badgeLabel}</span>
+          <span class="status-badge" style="background:${badgeColor};color:#15171B">${badgeLabel}</span>
         </div>
         <div class="record-card-meta">
           <span class="record-card-serial">${esc(r.serial_number)}</span>
@@ -134,6 +142,7 @@ function renderList(records) {
           ${r.date_completed ? `<span>&middot; completed ${esc(r.date_completed)}</span>` : ''}
           ${r.date_returned ? `<span>&middot; returned ${esc(r.date_returned)}</span>` : ''}
         </div>
+        ${isRefurb ? `<div class="field" style="margin-top:10px"><label>Refurb motor issued</label><div class="hint-text">Reconditioned replacement motor sent back in place of the original &mdash; serial <strong>${esc(r.refurb_serial)}</strong></div></div>` : ''}
         ${r.issue_reported ? `<div class="field" style="margin-top:10px"><label>Issue reported</label><div class="hint-text">${esc(r.issue_reported)}</div></div>` : ''}
         ${r.work_performed ? `<div class="field" style="margin-top:10px"><label>Work performed</label><div class="hint-text">${esc(r.work_performed)}</div></div>` : ''}
         ${r.parts_replaced ? `<div class="field" style="margin-top:10px"><label>Parts replaced</label><div class="hint-text">${esc(r.parts_replaced)}</div></div>` : ''}
