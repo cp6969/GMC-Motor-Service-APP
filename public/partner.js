@@ -77,7 +77,7 @@ async function loadRecords() {
     <div class="screen-body">
       <div class="section-label" style="margin-top:0">Motor service records</div>
       <p class="hint-text" style="margin-top:0">Search by serial number to check whether a motor was serviced here, and what was found/done.</p>
-      <input type="text" id="partner-search" placeholder="Search by serial number, brand, or dealer&hellip;" autocomplete="off" style="margin-bottom:16px" />
+      <input type="text" class="search-input" id="partner-search" placeholder="Search by serial number, brand, or dealer&hellip;" autocomplete="off" />
       <div id="partner-list"><div class="empty-state"><div class="spinner"></div></div></div>
     </div>
   `;
@@ -114,15 +114,22 @@ function renderList(records) {
   }
   listEl.innerHTML = records.map(r => {
     const meta = STAGE_META[r.status] || STAGE_META.received;
+    // "Returned" alone doesn't say who it went back to -- spell it out using
+    // the same dealer-vs-direct-customer distinction the internal app
+    // already tracks per record (source_type), rather than leaving it
+    // ambiguous for someone at Specialized who wasn't there for the intake.
+    const badgeLabel = r.status === 'returned'
+      ? (r.source_type === 'customer' ? 'Returned to Customer' : 'Returned to Dealer')
+      : meta.label;
     return `
       <div class="record-card" style="border-left-color:${meta.color}">
         <div class="record-card-top">
-          <span class="record-card-title">${esc(r.brand)}${r.model ? ' ' + esc(r.model) : ''}</span>
-          <span class="status-badge" style="background:${meta.color};color:#15171B">${meta.label}</span>
+          <span class="record-card-title">${esc(r.dealer_name) || 'Direct customer'}</span>
+          <span class="status-badge" style="background:${meta.color};color:#15171B">${badgeLabel}</span>
         </div>
         <div class="record-card-meta">
           <span class="record-card-serial">${esc(r.serial_number)}</span>
-          ${r.dealer_name ? `<span>&middot; sent by ${esc(r.dealer_name)}</span>` : ''}
+          <span>&middot; ${esc(r.brand)}${r.model ? ' ' + esc(r.model) : ''}</span>
           ${r.date_received ? `<span>&middot; in ${esc(r.date_received)}</span>` : ''}
           ${r.date_completed ? `<span>&middot; completed ${esc(r.date_completed)}</span>` : ''}
           ${r.date_returned ? `<span>&middot; returned ${esc(r.date_returned)}</span>` : ''}

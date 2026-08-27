@@ -1548,7 +1548,7 @@ app.post('/api/partner/login', (req, res) => {
 
 app.get('/api/partner/records', partnerAuthMiddleware, (req, res) => {
   const records = db.prepare(`
-    SELECT sr.id, sr.serial_number, sr.brand, sr.model, sr.status,
+    SELECT sr.id, sr.serial_number, sr.brand, sr.model, sr.status, sr.source_type,
            sr.date_received, sr.date_completed, sr.date_returned,
            sr.issue_reported, sr.work_performed, sr.parts_replaced,
            COALESCE(d.alias, sr.dealer_name) AS dealer_name
