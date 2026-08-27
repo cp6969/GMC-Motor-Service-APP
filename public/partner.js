@@ -23,6 +23,69 @@ function esc(str) {
   }[c]));
 }
 
+function fmtDateTime(d) {
+  if (!d) return '—';
+  // SQLite CURRENT_TIMESTAMP is "YYYY-MM-DD HH:MM:SS" in UTC with no
+  // timezone marker -- append one so the browser doesn't misread it as local.
+  const parsed = new Date(d.replace(' ', 'T') + 'Z');
+  if (isNaN(parsed)) return d;
+  return parsed.toLocaleString();
+}
+
+// Read-only equivalent of app.js's openLightbox, but scoped to one record's
+// photo set with prev/next navigation -- Specialized has no per-photo detail
+// view to fall back on the way the internal app does, so this is the only
+// way for them to page through a record's photos at full size.
+function openLightbox(images, startIndex) {
+  let idx = startIndex;
+  const overlay = document.createElement('div');
+  overlay.className = 'lightbox-overlay';
+
+  const img = document.createElement('img');
+  img.addEventListener('click', (e) => e.stopPropagation());
+
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'lightbox-close';
+  closeBtn.textContent = '×';
+
+  const prevBtn = document.createElement('button');
+  prevBtn.className = 'lightbox-nav lightbox-prev';
+  prevBtn.textContent = '‹';
+  const nextBtn = document.createElement('button');
+  nextBtn.className = 'lightbox-nav lightbox-next';
+  nextBtn.textContent = '›';
+
+  function show() {
+    img.src = `/uploads/${images[idx]}`;
+  }
+  function prev(e) { e.stopPropagation(); idx = (idx - 1 + images.length) % images.length; show(); }
+  function next(e) { e.stopPropagation(); idx = (idx + 1) % images.length; show(); }
+  function close() {
+    document.removeEventListener('keydown', onKey);
+    overlay.remove();
+  }
+  function onKey(e) {
+    if (e.key === 'Escape') close();
+    else if (e.key === 'ArrowLeft') prev(e);
+    else if (e.key === 'ArrowRight') next(e);
+  }
+
+  if (images.length > 1) {
+    prevBtn.addEventListener('click', prev);
+    nextBtn.addEventListener('click', next);
+    overlay.appendChild(prevBtn);
+    overlay.appendChild(nextBtn);
+  }
+  closeBtn.addEventListener('click', close);
+  overlay.addEventListener('click', close);
+  document.addEventListener('keydown', onKey);
+
+  overlay.appendChild(img);
+  overlay.appendChild(closeBtn);
+  show();
+  document.body.appendChild(overlay);
+}
+
 function logout() {
   TOKEN = null;
   localStorage.removeItem('gmc_partner_token');
@@ -113,7 +176,7 @@ function renderList(records) {
     listEl.innerHTML = '<div class="empty-state">No matching records.</div>';
     return;
   }
-  listEl.innerHTML = records.map(r => {
+  listEl.innerHTML = records.map((r, ri) => {
     const meta = STAGE_META[r.status] || STAGE_META.received;
     // A refurb swap always wins over the plain returned-to-X label -- the
     // motor that actually went back isn't the one that came in, so that's
@@ -143,6 +206,7 @@ function renderList(records) {
           ${r.date_returned ? `<span>&middot; returned ${esc(r.date_returned)}</span>` : ''}
         </div>
         ${isRefurb ? `<div class="field" style="margin-top:10px"><label>Refurb motor issued</label><div class="hint-text">Reconditioned replacement motor sent back in place of the original &mdash; serial <strong>${esc(r.refurb_serial)}</strong></div></div>` : ''}
+        ${r.test_ridden_at ? `<div class="field" style="margin-top:10px"><label>Test ride</label><div class="hint-text">&#9989; Test ridden &mdash; ${esc(fmtDateTime(r.test_ridden_at))}</div></div>` : ''}
         ${r.issue_reported ? `<div class="field" style="margin-top:10px"><label>Issue reported</label><div class="hint-text">${esc(r.issue_reported)}</div></div>` : ''}
         ${r.work_performed ? `<div class="field" style="margin-top:10px"><label>Work performed</label><div class="hint-text">${esc(r.work_performed)}</div></div>` : ''}
         ${r.parts_replaced ? `<div class="field" style="margin-top:10px"><label>Parts replaced</label><div class="hint-text">${esc(r.parts_replaced)}</div></div>` : ''}
@@ -150,13 +214,20 @@ function renderList(records) {
           <div class="field" style="margin-top:10px">
             <label>Photos</label>
             <div style="display:flex;gap:8px;flex-wrap:wrap">
-              ${r.images.map(f => `<a href="/uploads/${esc(f)}" target="_blank" rel="noopener"><img src="/uploads/${esc(f)}" alt="" style="width:64px;height:64px;object-fit:cover;border-radius:6px" /></a>`).join('')}
+              ${r.images.map((f, ii) => `<button type="button" class="partner-photo-thumb" data-record-idx="${ri}" data-img-idx="${ii}" style="padding:0;border:none;background:none;cursor:pointer"><img src="/uploads/${esc(f)}" alt="" style="width:64px;height:64px;object-fit:cover;border-radius:6px" /></button>`).join('')}
             </div>
           </div>
         ` : ''}
       </div>
     `;
   }).join('');
+
+  listEl.querySelectorAll('.partner-photo-thumb').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const record = records[Number(btn.dataset.recordIdx)];
+      openLightbox(record.images, Number(btn.dataset.imgIdx));
+    });
+  });
 }
 
 TOKEN ? loadRecords() : renderLogin();
